@@ -37,7 +37,7 @@ static String jobDir(const BkJob &j) {
 static String jobPath(const BkJob &j) { return jobDir(j) + "/" + j.label + ".bin"; }
 
 static void queueApp(const String &label, const String &name, bool onlyNew, bool force) {
-    String appNum = loadAppNumForLabel(label.c_str());
+    String appNum = launcherAppNumForLabel(label.c_str());
     if (appNum.isEmpty()) return;
     BackupInstallInfo info = loadInstalledFromConfig(appNum);
     Preferences p;

@@ -26,7 +26,8 @@ bool launcherBootCurrentApp();
 bool launcherBootAppByLabel(const char *label);
 bool launcherDeleteAppByLabel(const char *label);
 String launcherAppNameFromFile(const String &source);
-String loadAppNumForLabel(const char *label);
+// MantisCore: public access to the app's backup id (the registry keeps it file-private).
+String launcherAppNumForLabel(const char *label);
 bool launcherClearAppRegistry();
 
 #endif

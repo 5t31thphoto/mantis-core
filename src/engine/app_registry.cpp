@@ -342,6 +342,8 @@ static bool reportAppNotFound() {
     return false;
 }
 
+String launcherAppNumForLabel(const char *label) { return loadAppNumForLabel(label); }
+
 bool launcherBootAppByLabel(const char *label) {
     if (!label || !label[0]) return reportAppNotFound();
 
