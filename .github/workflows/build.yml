@@ -52,11 +52,10 @@ jobs:
               NFILE=$(find "$TMP" -mindepth 1 -maxdepth 1 -type f | wc -l)
               TOP=$(find "$TMP" -mindepth 1 -maxdepth 1 -type d | head -1 || true)
               if [ "$NDIR" -eq 1 ] && [ "$NFILE" -eq 0 ] && [ -n "$TOP" ]; then SRCDIR="$TOP"; else SRCDIR="$TMP"; fi
-              # The Actions token may not push workflow files, so a payload's
-              # workflow folders are left out (rename + commit those by hand).
-              for wf in github .github; do
-                if [ -d "$SRCDIR/$wf" ]; then echo "SKIP $wf/ (update workflows manually)"; rm -rf "$SRCDIR/$wf"; fi
-              done
+              # The Actions token may not push .github/ (workflow files), so only that
+              # folder is left out. github/ (no dot) lands in the repo normally; rename
+              # it to .github/ by hand when the workflow itself changes.
+              if [ -d "$SRCDIR/.github" ]; then echo "SKIP .github/ (update workflows manually)"; rm -rf "$SRCDIR/.github"; fi
               # the payload's src/ replaces the repo's src/ entirely, so removed files don't linger
               if [ -d "$SRCDIR/src" ]; then rm -rf src; fi
               cp -a "$SRCDIR"/. .
