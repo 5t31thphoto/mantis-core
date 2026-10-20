@@ -1,0 +1,4 @@
+.pio/
+.vscode/
+mantiscore-merged.bin
+__pycache__/

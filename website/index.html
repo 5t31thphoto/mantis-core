@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MantisCore — by BasaltSoftworks</title>
+<link rel="icon" href="assets/mascot.png">
+<style>
+  :root {
+    --bg: #1b1c1f;
+    --panel: #24262a;
+    --line: #34363a;
+    --teal: #007373;
+    --purple: #5d005d;
+    --green: #00ff00;
+    --text: #eef2ef;
+    --dim: #9aa39f;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: "Segoe UI", system-ui, sans-serif;
+    background:
+      radial-gradient(ellipse at 15% -10%, rgba(0,115,115,.45) 0%, transparent 50%),
+      radial-gradient(ellipse at 90% 110%, rgba(93,0,93,.45) 0%, transparent 50%),
+      var(--bg);
+    color: var(--text);
+    line-height: 1.55;
+    min-height: 100vh;
+  }
+  header { padding: 28px 20px 18px; border-bottom: 2px solid var(--teal); text-align: center; }
+  header img { width: 120px; image-rendering: pixelated; }
+  h1 { margin: 6px 0 0; font-size: 2.4rem; letter-spacing: .08em; color: var(--green); text-shadow: 0 0 18px rgba(0,255,0,.35); }
+  .by { color: var(--dim); letter-spacing: .2em; font-size: .8rem; text-transform: uppercase; }
+  .tag { color: var(--text); margin-top: 8px; }
+  main { max-width: 780px; margin: 0 auto; padding: 24px 16px 48px; }
+  section {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+    padding: 18px 20px; margin-bottom: 16px; box-shadow: 0 0 40px rgba(0,115,115,.10);
+  }
+  h2 { margin: 0 0 10px; color: var(--green); font-size: 1.15rem; }
+  p, li { color: #d6ddd9; }
+  code { background: #111; color: var(--green); padding: 1px 6px; border-radius: 4px; }
+  .shots { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .shots figure { margin: 0; }
+  .shots img { width: 100%; image-rendering: pixelated; border-radius: 8px; border: 1px solid var(--teal); display: block; }
+  .shots figcaption { color: var(--dim); font-size: .85rem; margin-top: 4px; text-align: center; }
+  @media (max-width: 560px) { .shots { grid-template-columns: 1fr; } }
+  .btn {
+    display: inline-block; background: linear-gradient(135deg, var(--teal), var(--purple));
+    color: var(--text); border: 1px solid var(--green); padding: 12px 20px; border-radius: 10px;
+    font-weight: 700; cursor: pointer; text-decoration: none; margin: 6px 8px 6px 0; font-size: 1rem;
+  }
+  .btn:hover { box-shadow: 0 0 14px rgba(0,255,0,.35); }
+  .btn.alt { background: var(--line); border-color: var(--teal); }
+  .note { border-left: 3px solid var(--purple); padding: 6px 12px; background: #1e1f23; border-radius: 6px; }
+  footer { text-align: center; color: var(--dim); font-size: .85rem; padding: 20px; }
+</style>
+<script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+</head>
+<body>
+<header>
+  <img src="assets/mascot.gif" alt="The MantisCore mantis mascot">
+  <h1>MantisCore</h1>
+  <div class="by">by BasaltSoftworks</div>
+  <p class="tag">One home screen for every Mantis app, on the M5Stack Core2</p>
+</header>
+<main>
+
+<section>
+  <h2>What it is</h2>
+  <p>
+    MantisCore is the home screen for your Mantis apps. Your apps sit on the SD card, and MantisCore shows them
+    as icons over your own wallpaper, with the time, the weather and the battery at the top. Tap an app and the
+    mantis shows its progress while the app starts. The first time you open an app, it installs it. After that,
+    the app starts straight away.
+  </p>
+  <div class="shots">
+    <figure><img src="assets/shot-home.png" alt="MantisCore home screen"><figcaption>Home: swipe through pages of apps</figcaption></figure>
+    <figure><img src="assets/shot-loading.png" alt="MantisCore loading screen"><figcaption>Opening an app</figcaption></figure>
+    <figure><img src="assets/shot-nixie.png" alt="Nixie tube clock on a workbench"><figcaption>Tap the clock: nixie mode</figcaption></figure>
+    <figure><img src="assets/shot-splash.png" alt="MantisCore start screen"><figcaption>Start screen</figcaption></figure>
+  </div>
+</section>
+
+<section>
+  <h2>How to use it</h2>
+  <ul>
+    <li><strong>Tap an app</strong> to open it. To get back to MantisCore, press the reset button.</li>
+    <li><strong>Swipe left or right</strong> to see more pages of apps.</li>
+    <li><strong>Hold an app</strong> to remove it from the device. Its saved progress stays on the SD card and comes back when you open it again.</li>
+    <li><strong>Tap the clock</strong> for the nixie clock. Tap anywhere to come back.</li>
+    <li><strong>Hold the clock</strong> to set the time, the time zone, or 12/24-hour time.</li>
+    <li><strong>Settings</strong> (the gear icon, last on the list): Wi-Fi, weather ZIP code, brightness, wallpapers and charging mode.</li>
+    <li>Your progress in each app is saved to the SD card in <code>/backups</code> automatically.</li>
+  </ul>
+</section>
+
+<section>
+  <h2>Install on Core2</h2>
+  <p>Use Chrome or Edge, a USB data cable, and make sure the Core2 is switched on.</p>
+  <esp-web-install-button manifest="firmware/manifest.json">
+    <button slot="activate" class="btn">Install MantisCore</button>
+    <span slot="unsupported">Use Chrome or Edge for USB install.</span>
+  </esp-web-install-button>
+  <p style="margin-top:12px">
+    <a class="btn alt" href="firmware/mantiscore-merged.bin" download>Download merged .bin</a>
+    <a class="btn alt" href="firmware/mantiscore-sd-card.zip" download>Download SD card files</a>
+  </p>
+  <p class="note">
+    Installing replaces the old launcher, so apps that are installed now are removed. Each one reinstalls by
+    itself the next time you tap it. To keep progress saved by the old launcher, copy
+    <code>/bkp/backupData.json</code> into a new <code>/backups</code> folder and leave <code>/bkp</code> where it is.
+  </p>
+</section>
+
+<section>
+  <h2>SD card setup</h2>
+  <ul>
+    <li>App files (<code>.bin</code>) go in the <strong>root</strong> of the card.</li>
+    <li>Unzip the <em>SD card files</em> download onto the card. This adds <code>/icons</code> and <code>/mantiscore</code>.</li>
+    <li>Wallpapers: <code>.mg</code> images in <code>/images</code>. Custom wallpapers go in <code>/images/backgrounds</code>.</li>
+    <li>New icons: use <code>tools/mantis_icon_maker.py</code> from the repo. It saves <code>/icons/&lt;app name&gt;.mi</code> next to the app.</li>
+  </ul>
+</section>
+
+</main>
+<footer>MantisCore v__VERSION__ · BasaltSoftworks · M5Stack Core2</footer>
+</body>
+</html>
