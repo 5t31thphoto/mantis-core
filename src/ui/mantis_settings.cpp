@@ -145,7 +145,10 @@ String mcKeyboard(const String &title, const String &initial, bool numeric, bool
             Key &k = keys[i];
             uint16_t fill = (int)i == pressedKey ? MC_TEAL : (k.code == 4 ? MC_PURPLE : MC_CHARCOAL2);
             mcCanvas.fillSmoothRoundRect(k.x, k.y, k.w, k.h, 6, fill);
-            mcText(k.cap.c_str(), k.x + k.w / 2, k.y + k.h / 2, k.cap.length() > 1 ? &fonts::Font2 : &fonts::FreeSansBold9pt7b,
+            const lgfx::v1::BaseFont* chosenFont = k.cap.length() > 1 
+                ? static_cast<const lgfx::v1::BaseFont*>(&fonts::Font2) 
+                : static_cast<const lgfx::v1::BaseFont*>(&fonts::FreeSansBold9pt7b);
+            mcText(k.cap.c_str(), k.x + k.w / 2, k.y + k.h / 2, chosenFont,
                    k.code == 4 ? MC_GREEN : MC_WHITE, middle_center);
         }
         mcPush();
