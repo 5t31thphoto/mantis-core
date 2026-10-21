@@ -46,6 +46,7 @@ struct McConfig {
     bool h24 = false;
     bool customBg = false; // false: /images, true: /images/backgrounds
     uint16_t bgIndex = 0;
+    bool metric = false;   // weather units: false = F / mph / in, true = C / km/h / mm
 };
 extern McConfig mcCfg;
 void mcConfigLoad();
@@ -77,14 +78,31 @@ void mcLoadingFrame(float progress, const String &status); // progress < 0 = ind
 void mcToast(const String &text, uint16_t color = MC_TEAL, uint32_t ms = 1800);
 
 // ---- network (background task)
-struct McWeather { bool valid = false; int tempF = 0; int code = -1; };
+// Plain data (no Strings) so the UI can take a consistent copy while the net task updates it.
+struct McWeather {
+    bool valid = false, metric = false, isDay = true;
+    time_t updated = 0;                          // when the forecast was fetched (UTC)
+    float temp = 0, feels = 0, precip = 0, pressure = 0, wind = 0, gust = 0, uv = 0;
+    int humidity = 0, code = -1, cloud = 0, windDir = 0;
+    float hi = 0, lo = 0, uvMax = 0;
+    int popMax = 0;                              // today's highest chance of rain, %
+    char sunrise[6] = "", sunset[6] = "";        // local "HH:MM"
+    int hours = 0;                               // valid entries in the next-12-hours arrays
+    float hourT[12] = {};
+    int hourPop[12] = {};
+    bool aqiValid = false;
+    int aqi = 0;                                 // US AQI 0-500
+    float pm25 = 0, pm10 = 0, co = 0, o3 = 0;    // ug/m3
+    char place[28] = "";
+};
 extern volatile bool mcNetBusy;
 extern volatile bool mcWifiUp;
 extern volatile bool mcNtpPending; // set by net task, consumed by UI (writes RTC)
-extern McWeather mcWeather;
+void mcWeatherSnapshot(McWeather &out);
 void mcNetStart();                 // (re)start connect + NTP + weather task
 void mcNetStop();
-const char *mcWeatherLabel(int code);
+void mcNetRefreshWeather();        // fetch again soon without reconnecting
+void mcWeatherScreen();            // full-screen weather instrument
 
 // ---- backups
 void mcBackupQueueAfterApp();      // queue last-run app + apps never backed up

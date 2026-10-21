@@ -25,11 +25,14 @@ To build locally, run `pio run -e mantiscore`. It writes `mantiscore-merged.bin`
 | `/icons/<bin name>.mi` | App icons. Make them with `tools/mantis_icon_maker.py` |
 | `/icons/<bin name>.txt` | Optional label override |
 | `/images/*.mg` | Wallpapers. Custom wallpapers go in `/images/backgrounds/*.mg` |
-| `/mantiscore/` | Nixie clock and loading screen backgrounds |
+| `/mantiscore/` | Nixie clock, weather screen and loading screen backgrounds |
 | `/backups/` | App data backups, created automatically |
 
 ## Source
 - `src/main.cpp`: boot screen and boot flow.
 - `src/ui/`: home screen, settings, nixie clock, loading screen, backups, Wi-Fi and weather.
 - `src/engine/`: the installer, partition table, app registry and backup engine, taken from Launcher (MIT licensed) with everything MantisCore doesn't use removed. `engine_glue.cpp` connects it to the UI.
-- `tools/`: `mantis_icon_maker.py` makes app icons; `build_assets.py` regenerates `src/ui/mantis_assets.h` and the SD backgrounds from `tools/art/`.
+- `tools/`: `mantis_icon_maker.py` makes app icons. `build_assets.py` regenerates `src/ui/mantis_assets.h` and the SD backgrounds from `tools/art/`. `weather_build.py` regenerates `src/ui/mantis_weather_assets.h` and `weather.mg`; run it after `build_assets.py`, because it reuses the nixie glyph size.
+
+## Weather screen
+Tap the weather in the home-screen header to open it, and tap anywhere to go back. Data comes from Open-Meteo: the forecast API, plus the air-quality API for AQI, PM2.5, PM10, CO and ozone. It refreshes every 15 minutes, and immediately when the data is more than 10 minutes old as you open the screen. Units (°F/mph/in or °C/km/h/mm) are set in Settings → Weather units.

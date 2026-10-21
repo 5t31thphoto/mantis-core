@@ -181,6 +181,7 @@ void mcConfigLoad() {
     mcCfg.h24 = p.getBool("h24", false);
     mcCfg.customBg = p.getBool("custbg", false);
     mcCfg.bgIndex = p.getUShort("bgidx", 0);
+    mcCfg.metric = p.getBool("metric", false);
     p.end();
     if (mcCfg.tzIndex >= mcTimeZoneCount) mcCfg.tzIndex = 3;
     if (mcCfg.bright < 5 || mcCfg.bright > 100) mcCfg.bright = 70;
@@ -197,6 +198,7 @@ void mcConfigSave() {
     p.putBool("h24", mcCfg.h24);
     p.putBool("custbg", mcCfg.customBg);
     p.putUShort("bgidx", mcCfg.bgIndex);
+    p.putBool("metric", mcCfg.metric);
     p.end();
 }
 

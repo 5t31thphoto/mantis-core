@@ -335,6 +335,7 @@ void mcSettings() {
             String wallVal = "none found";
             if (wallCount) wallVal = String(mcCfg.bgIndex % wallCount + 1) + " of " + String(wallCount);
             rows.push_back({"Next wallpaper", wallVal, 0, 0});
+            rows.push_back({"Weather units", String(mcCfg.metric ? "C, km/h, mm" : "F, mph, in"), 0, 0});
             rows.push_back({"Charging mode", "", 0, 0});
             rows.push_back({"About", String("v" MANTISCORE_VERSION), 2, 0});
             return rows;
@@ -366,8 +367,14 @@ void mcSettings() {
                         mcConfigSave();
                     }
                     break;
-                case 6: mcChargeMode(); break;
-                case 7: mcToast("MantisCore v" MANTISCORE_VERSION " by BasaltSoftworks", MC_GREEN, 1800); break;
+                case 6:
+                    mcNetStop();
+                    mcCfg.metric = !mcCfg.metric;
+                    mcConfigSave();
+                    mcNetStart(); // refetch in the new units
+                    break;
+                case 7: mcChargeMode(); break;
+                case 8: mcToast("MantisCore v" MANTISCORE_VERSION " by BasaltSoftworks", MC_GREEN, 1800); break;
             }
             return true;
         },

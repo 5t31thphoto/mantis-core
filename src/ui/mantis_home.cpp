@@ -178,13 +178,17 @@ static void drawHeader() {
         if (charging) mcText("+", x - 3, 11, &fonts::Font0, MC_GREEN, middle_right);
         x -= 12;
     }
-    if (mcWeather.valid) {
+    McWeather wx;
+    mcWeatherSnapshot(wx);
+    if (wx.valid) {
         char t[8];
-        snprintf(t, sizeof(t), "%d\xF7", mcWeather.tempF); // degree sign in Font2
+        snprintf(t, sizeof(t), "%d", (int)lroundf(wx.temp));
+        mcCanvas.drawCircle(x - 2, 7, 2, MC_WHITE); // degree mark (Font2 has no degree glyph)
+        x -= 6;
         mcText(t, x, MC_HEADER_H / 2 + 1, &fonts::Font2, MC_WHITE, middle_right);
         mcCanvas.setFont(&fonts::Font2);
         x -= mcCanvas.textWidth(t) + 20;
-        drawWeatherIcon(x, 2, mcWeather.code);
+        drawWeatherIcon(x, 2, wx.code);
     } else if (mcCfg.ssid.length() && mcNetBusy) {
         mcText("...", x, MC_HEADER_H / 2 + 1, &fonts::Font2, MC_GREY, middle_right);
     }
@@ -348,6 +352,9 @@ void mantisRun() {
             } else if (!mcTouch.moved && !mcTouch.longFired) {
                 if (inHeader && mcTouch.startX < 120) {
                     mcNixieClock();
+                    render(0);
+                } else if (inHeader && mcTouch.startX >= 160) { // weather / battery side of the header
+                    mcWeatherScreen();
                     render(0);
                 } else if (!inHeader) {
                     int idx = hitIcon(mcTouch.startX, mcTouch.startY);

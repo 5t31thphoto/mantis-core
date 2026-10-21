@@ -1,6 +1,6 @@
-// MantisCore networking: background Wi-Fi connect, NTP sync and weather (Open-Meteo, ZIP via zippopotam.us).
-// Weather uses the same approach as Mantis Pinball's weather mode: Open-Meteo geocoding (ZIP -> lat/lon)
-// and forecast over HTTPS with WiFiClientSecure.
+// MantisCore networking: background Wi-Fi connect, NTP sync and weather.
+// Weather uses the same approach as Mantis Pinball's weather mode: Open-Meteo geocoding (ZIP -> place)
+// then the Open-Meteo forecast and air-quality APIs over HTTPS (WiFiClientSecure, HTTP/1.0).
 #include "mantis_internal.h"
 #include <ArduinoJson.h>
 #include <WiFi.h>
@@ -10,22 +10,23 @@
 volatile bool mcNetBusy = false;
 volatile bool mcWifiUp = false;
 volatile bool mcNtpPending = false;
-McWeather mcWeather;
 
+static McWeather wxShared;                                // written by the net task
+static portMUX_TYPE wxMux = portMUX_INITIALIZER_UNLOCKED; // guards wxShared (plain data, memcpy only)
 static TaskHandle_t netTask = nullptr;
 static volatile bool netRestart = false;
 static volatile bool netPaused = false;
+static volatile bool netFetchNow = false;
 
-const char *mcWeatherLabel(int code) {
-    if (code == 0) return "Clear";
-    if (code <= 2) return "Partly cloudy";
-    if (code == 3) return "Cloudy";
-    if (code == 45 || code == 48) return "Fog";
-    if (code >= 51 && code <= 57) return "Drizzle";
-    if ((code >= 61 && code <= 67) || (code >= 80 && code <= 82)) return "Rain";
-    if ((code >= 71 && code <= 77) || code == 85 || code == 86) return "Snow";
-    if (code >= 95) return "Storm";
-    return "";
+void mcWeatherSnapshot(McWeather &out) {
+    taskENTER_CRITICAL(&wxMux);
+    memcpy(&out, &wxShared, sizeof(McWeather));
+    taskEXIT_CRITICAL(&wxMux);
+}
+static void publish(const McWeather &w) {
+    taskENTER_CRITICAL(&wxMux);
+    memcpy(&wxShared, &w, sizeof(McWeather));
+    taskEXIT_CRITICAL(&wxMux);
 }
 
 // HTTPS GET into a String (pattern from Mantis Pinball wxGetS).
@@ -37,7 +38,7 @@ static bool httpsGet(const char *host, const String &path, String &body) {
     c.printf("GET %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: mantiscore/1\r\n"
              "Accept: application/json\r\nConnection: close\r\n\r\n",
              path.c_str(), host);
-    uint32_t dl = millis() + 14000;
+    uint32_t dl = millis() + 15000;
     while (c.connected() && millis() < dl) {
         String ln = c.readStringUntil('\n');
         if (ln == "\r" || ln == "") break;
@@ -47,45 +48,110 @@ static bool httpsGet(const char *host, const String &path, String &body) {
         }
     }
     body = "";
+    body.reserve(6144);
     while ((c.connected() || c.available()) && millis() < dl) {
         int ch = c.read();
         if (ch < 0) {
             delay(1);
             continue;
         }
-        if (body.length() < 8192) body += (char)ch;
+        if (body.length() < 16384) body += (char)ch;
     }
     c.stop();
     return body.length() > 0;
 }
 
-static bool fetchWeather(const String &zip) {
+static void copyTime(char *dst, const char *iso) { // "2026-10-20T07:41" -> "07:41"
+    dst[0] = 0;
+    if (!iso) return;
+    const char *t = strchr(iso, 'T');
+    if (t && strlen(t) >= 6) {
+        memcpy(dst, t + 1, 5);
+        dst[5] = 0;
+    }
+}
+
+static bool fetchWeather(const String &zip, bool metric) {
     static String cachedZip;
     static float lat = 0, lon = 0;
+    static char place[28] = "";
     String body;
     if (zip != cachedZip) {
         if (!httpsGet("geocoding-api.open-meteo.com", "/v1/search?name=" + zip + "&count=1&language=en&format=json", body))
             return false;
         JsonDocument doc;
         if (deserializeJson(doc, body)) return false;
-        JsonVariant place = doc["results"][0];
-        if (place.isNull()) return false;
-        lat = place["latitude"] | 0.0f;
-        lon = place["longitude"] | 0.0f;
+        JsonVariant p = doc["results"][0];
+        if (p.isNull()) return false;
+        lat = p["latitude"] | 0.0f;
+        lon = p["longitude"] | 0.0f;
+        snprintf(place, sizeof(place), "%s", (const char *)(p["name"] | ""));
         cachedZip = zip;
     }
-    char path[160];
+    McWeather w;
+    w.metric = metric;
+    snprintf(w.place, sizeof(w.place), "%s", place);
+    char path[700];
     snprintf(path, sizeof(path),
-             "/v1/forecast?latitude=%.4f&longitude=%.4f&current=temperature_2m,weather_code&temperature_unit=fahrenheit",
-             lat, lon);
+             "/v1/forecast?latitude=%.4f&longitude=%.4f"
+             "&current=temperature_2m,relative_humidity_2m,apparent_temperature,is_day,precipitation,weather_code,"
+             "cloud_cover,pressure_msl,wind_speed_10m,wind_direction_10m,wind_gusts_10m,uv_index"
+             "&hourly=temperature_2m,precipitation_probability&forecast_hours=12"
+             "&daily=temperature_2m_max,temperature_2m_min,sunrise,sunset,precipitation_probability_max,uv_index_max"
+             "&forecast_days=1&timezone=auto&temperature_unit=%s&wind_speed_unit=%s&precipitation_unit=%s",
+             lat, lon, metric ? "celsius" : "fahrenheit", metric ? "kmh" : "mph", metric ? "mm" : "inch");
     if (!httpsGet("api.open-meteo.com", path, body)) return false;
-    JsonDocument doc;
-    if (deserializeJson(doc, body)) return false;
-    JsonVariant cur = doc["current"];
-    if (cur.isNull()) return false;
-    mcWeather.tempF = (int)lroundf(cur["temperature_2m"] | 0.0f);
-    mcWeather.code = cur["weather_code"] | -1;
-    mcWeather.valid = true;
+    {
+        JsonDocument doc;
+        if (deserializeJson(doc, body)) return false;
+        JsonVariant cur = doc["current"];
+        if (cur.isNull()) return false;
+        w.temp = cur["temperature_2m"] | 0.0f;
+        w.feels = cur["apparent_temperature"] | w.temp;
+        w.humidity = cur["relative_humidity_2m"] | 0;
+        w.isDay = (cur["is_day"] | 1) != 0;
+        w.precip = cur["precipitation"] | 0.0f;
+        w.code = cur["weather_code"] | -1;
+        w.cloud = cur["cloud_cover"] | 0;
+        w.pressure = cur["pressure_msl"] | 0.0f;
+        w.wind = cur["wind_speed_10m"] | 0.0f;
+        w.windDir = cur["wind_direction_10m"] | 0;
+        w.gust = cur["wind_gusts_10m"] | 0.0f;
+        w.uv = cur["uv_index"] | 0.0f;
+        JsonVariant day = doc["daily"];
+        w.hi = day["temperature_2m_max"][0] | w.temp;
+        w.lo = day["temperature_2m_min"][0] | w.temp;
+        w.popMax = day["precipitation_probability_max"][0] | 0;
+        w.uvMax = day["uv_index_max"][0] | 0.0f;
+        copyTime(w.sunrise, day["sunrise"][0] | "");
+        copyTime(w.sunset, day["sunset"][0] | "");
+        JsonArray ht = doc["hourly"]["temperature_2m"];
+        JsonArray hp = doc["hourly"]["precipitation_probability"];
+        for (JsonVariant v : ht) {
+            if (w.hours >= 12 || v.isNull()) break;
+            w.hourT[w.hours] = v.as<float>();
+            w.hourPop[w.hours] = hp[w.hours] | 0;
+            w.hours++;
+        }
+    }
+    snprintf(path, sizeof(path),
+             "/v1/air-quality?latitude=%.4f&longitude=%.4f&current=us_aqi,pm2_5,pm10,carbon_monoxide,ozone&timezone=auto",
+             lat, lon);
+    if (httpsGet("air-quality-api.open-meteo.com", path, body)) {
+        JsonDocument doc;
+        if (!deserializeJson(doc, body) && !doc["current"].isNull()) {
+            JsonVariant cur = doc["current"];
+            w.aqi = cur["us_aqi"] | -1;
+            w.pm25 = cur["pm2_5"] | 0.0f;
+            w.pm10 = cur["pm10"] | 0.0f;
+            w.co = cur["carbon_monoxide"] | 0.0f;
+            w.o3 = cur["ozone"] | 0.0f;
+            w.aqiValid = w.aqi >= 0;
+        }
+    }
+    w.updated = time(nullptr);
+    w.valid = true;
+    publish(w);
     return true;
 }
 
@@ -106,6 +172,7 @@ static void netLoop(void *) {
         mcWifiUp = false;
         // snapshot: the UI only edits these while the task is stopped (mcNetStop) or idle
         String ssid = mcCfg.ssid, pass = mcCfg.pass, zip = mcCfg.zip, tz = mcTimeZones[mcCfg.tzIndex].posix;
+        bool metric = mcCfg.metric;
         if (!netPaused && ssid.length()) {
             mcNetBusy = true;
             if (wifiConnect(ssid, pass, 15000)) {
@@ -113,31 +180,36 @@ static void netLoop(void *) {
                 configTzTime(tz.c_str(), "pool.ntp.org", "time.nist.gov");
                 for (int i = 0; i < 40 && time(nullptr) < 1704067200; i++) vTaskDelay(pdMS_TO_TICKS(250));
                 if (time(nullptr) >= 1704067200) mcNtpPending = true; // UI thread writes the RTC
-                if (zip.length() == 5) fetchWeather(zip);
+                if (zip.length() == 5) fetchWeather(zip, metric);
             }
             mcNetBusy = false;
         }
-        // refresh weather every 30 minutes, or sooner when settings change
-        for (int s = 0; s < 1800 && !netRestart; s++) vTaskDelay(pdMS_TO_TICKS(1000));
-        if (!netRestart && mcWifiUp && !netPaused && zip.length() == 5) {
-            mcNetBusy = true;
-            fetchWeather(zip);
-            mcNetBusy = false;
-            netRestart = false;
-            for (int s = 0; s < 1800 && !netRestart; s++) vTaskDelay(pdMS_TO_TICKS(1000));
+        // refresh every 15 minutes, on request, or reconnect when settings change
+        while (!netRestart) {
+            netFetchNow = false;
+            for (int s = 0; s < 900 && !netRestart && !netFetchNow; s++) vTaskDelay(pdMS_TO_TICKS(1000));
+            if (netRestart) break;
+            if (mcWifiUp && !netPaused && zip.length() == 5 && WiFi.status() == WL_CONNECTED) {
+                mcNetBusy = true;
+                fetchWeather(zip, metric);
+                mcNetBusy = false;
+            } else if (!netPaused && ssid.length()) {
+                break; // Wi-Fi dropped: reconnect
+            }
         }
     }
 }
 
 void mcNetStart() {
     netPaused = false;
-    mcWeather.valid = false;
     if (netTask) {
         netRestart = true;
         return;
     }
     xTaskCreatePinnedToCore(netLoop, "mcNet", 16384, nullptr, 1, &netTask, 0);
 }
+
+void mcNetRefreshWeather() { netFetchNow = true; }
 
 void mcNetStop() {
     netPaused = true;
