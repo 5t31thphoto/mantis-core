@@ -13,7 +13,7 @@ Zip-drop, the same as the other Mantis repos:
    - `firmware/mantiscore-merged.bin`
    - `firmware/mantiscore-sd-card.zip`, made from `sd_card/`
 
-To build locally, run `pio run -e mantiscore`. It writes `mantiscore-merged.bin` to the project root and fails if the app is larger than its 1.5 MB slot.
+To build locally, run `pio run -e mantiscore`. It writes `mantiscore-merged.bin` to the project root and fails if the app is larger than its 2 MB slot.
 
 ## How it boots
 `platformio.ini` pins the "keyboot" Arduino libs build. Its bootloader starts MantisCore (the `app0` test partition) on power-on or the reset button, and starts the selected app when the app reboots itself. The bootloader reads `DDLB`, `LauncherOnKey` and `LauncherKeyLvl` from NVS namespace `launcher`; MantisCore writes those keys with the default values.
