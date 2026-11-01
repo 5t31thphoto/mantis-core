@@ -43,8 +43,8 @@ void setup() {
     getFromNVS();
     saveIntoNVS(); // make sure the bootloader keys exist
 
+    setupSdCard(); // before the splash: its art comes from /mantiscore/assets.bin
     mantisSplashBegin();
-    setupSdCard();
 
     uint32_t start = millis();
     uint32_t window = 1000 + (bootToApp ? bootTimer * 1000UL : 0);

@@ -111,9 +111,19 @@ static void drawTubes(int value, bool show, uint8_t flick) {
         if (value < 0) glyph[pos++] = 10;
         while (n) glyph[pos++] = digits[--n];
     }
+    if (!NIXIE_GLYPHS) { // asset pack missing: the number in plain amber over the tubes
+        if (show) {
+            char t[8];
+            snprintf(t, sizeof(t), "%d", value);
+            mcText(t, (WX_TUBE_XY[0][0] + WX_TUBE_XY[3][0] + NIXIE_GW) / 2, WX_TUBE_XY[0][1] + NIXIE_GH / 2, &fonts::Font4,
+                   0xFD20, middle_center, true);
+        }
+        return;
+    }
     for (int i = 0; i < 4; i++) {
         if (glyph[i] < 0) continue;
         const uint16_t *g = glyph[i] == 10 ? WX_NIXIE_MINUS : NIXIE_GLYPHS + glyph[i] * GSZ;
+        if (!g) continue;
         mcBlitAdd(WX_TUBE_XY[i][0], WX_TUBE_XY[i][1], NIXIE_GW, NIXIE_GH, g, i == 2 ? flick : 255);
     }
 }
@@ -226,6 +236,7 @@ static void crtIcon(int icon, int x, int y, bool isDay) {
         mcCanvas.fillCircle(x + 22, y + 11, 10, 0x0081); // CRT glass colour bites the crescent
         return;
     }
+    if (!WX_ICON_RGB) return; // asset pack missing: the words below still say it
     mcBlitAlpha(x, y, WX_ICON, WX_ICON, WX_ICON_RGB + icon * WX_ICON * WX_ICON, WX_ICON_A + icon * WX_ICON * WX_ICON);
 }
 
@@ -239,7 +250,7 @@ static void drawCrt(const McWeather &w, int page, uint32_t now) {
         for (int i = 0; i < 4; i++) mcText(msg[i], cx, Y + 18 + i * 12, &fonts::Font0, G, middle_center);
     } else if (page == PG_NOW) {
         crtIcon(iconFor(w.code), cx - 16, Y + 3, w.isDay);
-        if (isStormy(w.code) && (now / 120) % 25 < 3) // lightning flash
+        if (WX_BOLT_FRAMES && isStormy(w.code) && (now / 120) % 25 < 3) // lightning flash
             mcBlitAdd(cx - WX_BOLT / 2, Y + 4, WX_BOLT, WX_BOLT, WX_BOLT_FRAMES + ((now / 120) % 3) * WX_BOLT * WX_BOLT, 255);
         const char *a, *c;
         wordsFor(w.code, w.isDay, a, c);
@@ -309,7 +320,7 @@ static void drawCrt(const McWeather &w, int page, uint32_t now) {
         int pages = w.aqiValid ? PG_COUNT : PG_COUNT - 1;
         for (int i = 0; i < pages; i++) mcCanvas.fillRect(cx - pages * 3 + i * 6, Y + H - 3, 3, 2, i == page ? G : MC_DIMGREEN);
     }
-    if (w.valid && page == PG_NOW && isRainy(w.code)) // rain streaks over the glass
+    if (WX_RAIN_FRAMES && w.valid && page == PG_NOW && isRainy(w.code)) // rain streaks over the glass
         mcBlitAdd(X, Y, W, H, WX_RAIN_FRAMES + ((now / 110) % 4) * W * H, 200);
     // scanlines + slight flicker
     uint8_t keep = 205 + ((now / 70) % 7 == 0 ? 20 : 0);

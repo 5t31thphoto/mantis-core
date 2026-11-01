@@ -1,5 +1,5 @@
 # MantisCore merged image: bootloader (0x1000) + partition table (0x8000) + app (0x10000)
-# -> mantiscore-merged.bin, flashed at 0x0. Fails the build if the app outgrows its 2 MB slot.
+# -> mantiscore-merged.bin, flashed at 0x0. Fails the build if the app outgrows its 1.5 MB slot.
 # Same esptool invocation that Launcher uses with this platform.
 Import("env")
 import os, subprocess
@@ -9,7 +9,7 @@ build_dir = Path(env.subst("$BUILD_DIR"))
 proj_dir = Path(env.subst("$PROJECT_DIR"))
 boot_bin, part_bin, app_bin = build_dir / "bootloader.bin", build_dir / "partitions.bin", build_dir / "firmware.bin"
 out_bin = proj_dir / "mantiscore-merged.bin"
-APP_SLOT = 0x200000  # app0 (test) in partitions.csv - keep in sync
+APP_SLOT = 0x180000  # app0 (test) in partitions.csv - keep in sync
 esptool_pkg = env.PioPlatform().get_package_dir("tool-esptoolpy")
 
 def merge(target, source, env):

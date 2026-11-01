@@ -1,5 +1,5 @@
 """MantisCore weather screen asset builder.
-Usage: python tools/weather_build.py src/ui/mantis_weather_assets.h <SD card>/mantiscore
+Usage: python tools/weather_build.py tools/generated/mantis_weather_assets.h sd_card/mantiscore  (then: python tools/pack_assets.py)
 Writes the weather backdrop (bench + instrument chassis, readout areas cleaned) to weather.mg and
 the icons, animation frames, minus-sign nixie glyph and screen geometry to the header."""
 import os, sys, struct, collections, re
@@ -107,7 +107,7 @@ H += "#define WX_BOLT 30\n" + arr("WX_BOLT_FRAMES", "uint16_t", [c565(*p) for f 
 
 # ------------------------------------------------------------------ nixie minus sign (same box as the clock glyphs)
 sys.path.insert(0, HERE)
-hdr_txt = open(os.path.join(HERE, '..', 'src', 'ui', 'mantis_assets.h')).read()
+hdr_txt = open(os.path.join(HERE, 'generated', 'mantis_assets.h')).read()
 GW = int(re.search(r'#define NIXIE_GW (\d+)', hdr_txt).group(1)); GH = int(re.search(r'#define NIXIE_GH (\d+)', hdr_txt).group(1))
 PAD = int(re.search(r'#define NIXIE_PAD (\d+)', hdr_txt).group(1))
 m = Image.new('RGB', (GW, GH)); md = ImageDraw.Draw(m)

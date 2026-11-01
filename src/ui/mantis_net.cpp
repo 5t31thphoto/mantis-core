@@ -1,10 +1,10 @@
 // MantisCore networking: background Wi-Fi connect, NTP sync and weather.
-// Weather uses the same approach as Mantis Pinball's weather mode: Open-Meteo geocoding (ZIP -> place)
-// then the Open-Meteo forecast and air-quality APIs over HTTPS (WiFiClientSecure, HTTP/1.0).
+// Weather: Open-Meteo geocoding (ZIP -> place), then the forecast and air-quality APIs, over plain
+// HTTP/1.0 (Open-Meteo: "HTTPS is optional"). No TLS client is linked, which keeps ~100+ KB of
+// mbedTLS/certificate code out of the firmware. Weather data is public, so nothing secret travels.
 #include "mantis_internal.h"
 #include <ArduinoJson.h>
 #include <WiFi.h>
-#include <WiFiClientSecure.h>
 #include <time.h>
 
 volatile bool mcNetBusy = false;
@@ -29,12 +29,11 @@ static void publish(const McWeather &w) {
     taskEXIT_CRITICAL(&wxMux);
 }
 
-// HTTPS GET into a String (pattern from Mantis Pinball wxGetS).
-static bool httpsGet(const char *host, const String &path, String &body) {
-    WiFiClientSecure c;
-    c.setInsecure();
+// HTTP GET into a String (request/response handling as in Mantis Pinball's wxGetS).
+static bool httpGet(const char *host, const String &path, String &body) {
+    WiFiClient c;
     c.setTimeout(12000); // Arduino core 3: milliseconds (Stream semantics)
-    if (!c.connect(host, 443)) return false;
+    if (!c.connect(host, 80)) return false;
     c.printf("GET %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: mantiscore/1\r\n"
              "Accept: application/json\r\nConnection: close\r\n\r\n",
              path.c_str(), host);
@@ -77,7 +76,7 @@ static bool fetchWeather(const String &zip, bool metric) {
     static char place[28] = "";
     String body;
     if (zip != cachedZip) {
-        if (!httpsGet("geocoding-api.open-meteo.com", "/v1/search?name=" + zip + "&count=1&language=en&format=json", body))
+        if (!httpGet("geocoding-api.open-meteo.com", "/v1/search?name=" + zip + "&count=1&language=en&format=json", body))
             return false;
         JsonDocument doc;
         if (deserializeJson(doc, body)) return false;
@@ -100,7 +99,7 @@ static bool fetchWeather(const String &zip, bool metric) {
              "&daily=temperature_2m_max,temperature_2m_min,sunrise,sunset,precipitation_probability_max,uv_index_max"
              "&forecast_days=1&timezone=auto&temperature_unit=%s&wind_speed_unit=%s&precipitation_unit=%s",
              lat, lon, metric ? "celsius" : "fahrenheit", metric ? "kmh" : "mph", metric ? "mm" : "inch");
-    if (!httpsGet("api.open-meteo.com", path, body)) return false;
+    if (!httpGet("api.open-meteo.com", path, body)) return false;
     {
         JsonDocument doc;
         if (deserializeJson(doc, body)) return false;
@@ -137,7 +136,7 @@ static bool fetchWeather(const String &zip, bool metric) {
     snprintf(path, sizeof(path),
              "/v1/air-quality?latitude=%.4f&longitude=%.4f&current=us_aqi,pm2_5,pm10,carbon_monoxide,ozone&timezone=auto",
              lat, lon);
-    if (httpsGet("air-quality-api.open-meteo.com", path, body)) {
+    if (httpGet("air-quality-api.open-meteo.com", path, body)) {
         JsonDocument doc;
         if (!deserializeJson(doc, body) && !doc["current"].isNull()) {
             JsonVariant cur = doc["current"];

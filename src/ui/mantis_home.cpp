@@ -148,9 +148,9 @@ static void drawPage(int p, int dx) {
         x += dx;
         if (x < -80 || x > MC_W) continue;
         McApp &a = apps[idx];
-        if (a.builtin == 1) mcBlitAlpha(x, y, 64, 64, SETTINGS_ICON_RGB, SETTINGS_ICON_A);
+        if (a.builtin == 1 && SETTINGS_ICON_RGB) mcBlitAlpha(x, y, 64, 64, SETTINGS_ICON_RGB, SETTINGS_ICON_A);
         else if (a.icon.rgb) mcBlitAlpha(x, y, 64, 64, a.icon.rgb, a.icon.a);
-        else if (a.builtin == 2) mcBlitAlpha(x, y, 64, 64, MUSIC_ICON_RGB, MUSIC_ICON_A);
+        else if (a.builtin == 2 && MUSIC_ICON_RGB) mcBlitAlpha(x, y, 64, 64, MUSIC_ICON_RGB, MUSIC_ICON_A);
         else drawFallbackIcon(a, x, y);
         mcText(a.title.c_str(), x + 32, y + 78, &fonts::Font2, MC_WHITE, middle_center, true);
     }
@@ -445,7 +445,9 @@ void mcNixieClock() {
         mcBlitRGB(0, 0, MC_W, MC_H, nixieBg);
         struct timeval tv;
         gettimeofday(&tv, nullptr);
-        for (int i = 0; i < 5; i++) {
+        if (!NIXIE_GLYPHS) // asset pack missing: plain glowing time over the tubes
+            mcText(mcClockString().c_str(), 160, NIXIE_TUBE_XY[0][1] + NIXIE_GH / 2, &fonts::Font4, 0xFD20, middle_center, true);
+        for (int i = 0; i < 5 && NIXIE_GLYPHS; i++) {
             int x = NIXIE_TUBE_XY[i][0], y = NIXIE_TUBE_XY[i][1];
             if (i == 2) { // colon breathes with the seconds
                 float ph = (tv.tv_usec / 1000000.0f);

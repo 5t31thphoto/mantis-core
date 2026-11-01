@@ -1,5 +1,6 @@
 // MantisCore core: graphics helpers, images, settings, time, touch, loading screen, engine hooks, splash.
 #include "mantis.h"
+#include "mantis_asset_pack.h"
 #include "mantis_assets.h"
 #include "mantis_internal.h"
 #include <ArduinoJson.h>
@@ -103,6 +104,7 @@ void mcBlitAdd(int x, int y, int w, int h, const uint16_t *px, uint8_t level) {
 }
 
 void mcDrawMascot(int frame, int x, int y, int scale) {
+    if (!MASCOT_PIX) return; // asset pack missing: screens still work, just without the mantis
     frame = ((frame % MASCOT_FRAMES) + MASCOT_FRAMES) % MASCOT_FRAMES;
     uint16_t *buf = mcBuf();
     const uint8_t *base = MASCOT_PIX + (size_t)frame * MASCOT_H * MASCOT_STRIDE;
@@ -133,6 +135,48 @@ void mcText(const char *s, int x, int y, const lgfx::IFont *font, uint16_t color
     }
     mcCanvas.setTextColor(color);
     mcCanvas.drawString(s, x, y);
+}
+
+// ------------------------------------------------------------------ SD asset pack
+// /mantiscore/assets.bin: "MCAP", u32 id, u16 count, count x {char name[24], u32 offset, u32 size}, data.
+// All-or-nothing: if the file is missing, from another build (id) or any entry doesn't match, every
+// pointer stays nullptr and the UI draws its fallbacks.
+bool mcAssetsLoad() {
+    static bool loaded = false;
+    if (loaded) return true;
+    File f = SD.open("/mantiscore/assets.bin", FILE_READ);
+    if (!f) return false;
+    size_t size = f.size();
+    uint8_t *buf = (size > 10 && size < 2 * 1024 * 1024) ? (uint8_t *)ps_malloc(size) : nullptr;
+    bool ok = buf && f.read(buf, size) == size;
+    f.close();
+    uint32_t id = 0;
+    uint16_t count = 0;
+    if (ok) {
+        memcpy(&id, buf + 4, 4);
+        memcpy(&count, buf + 8, 2);
+        ok = memcmp(buf, "MCAP", 4) == 0 && id == mcAssetPackId && count == mcAssetCount && 10 + 32u * count <= size;
+    }
+    for (int i = 0; ok && i < mcAssetCount; i++) {
+        bool found = false;
+        for (int k = 0; k < count && !found; k++) {
+            const uint8_t *e = buf + 10 + 32 * k;
+            uint32_t off, len;
+            memcpy(&off, e + 24, 4);
+            memcpy(&len, e + 28, 4);
+            if (strncmp((const char *)e, mcAssetTable[i].name, 24) != 0) continue;
+            found = len == mcAssetTable[i].bytes && off + len <= size && (off & 3) == 0;
+            if (found) *mcAssetTable[i].ptr = buf + off;
+        }
+        ok = found;
+    }
+    if (!ok) {
+        for (int i = 0; i < mcAssetCount; i++) *mcAssetTable[i].ptr = nullptr;
+        free(buf);
+        return false;
+    }
+    loaded = true; // buffer stays in PSRAM for the life of the app
+    return true;
 }
 
 // ------------------------------------------------------------------ images
@@ -464,6 +508,7 @@ void mantisEngineMessage(const String &text) {
 static uint32_t splashStart = 0, splashLast = 0;
 
 void mantisSplashBegin() {
+    mcAssetsLoad(); // SD is mounted first (main.cpp)
     mcConfigLoad();
     mcGfxInit();
     splashStart = millis();

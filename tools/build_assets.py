@@ -1,5 +1,5 @@
 """MantisCore asset builder.
-Usage: python tools/build_assets.py src/ui/mantis_assets.h <SD card>/mantiscore
+Usage: python tools/build_assets.py tools/generated/mantis_assets.h sd_card/mantiscore  (then: python tools/pack_assets.py)
 Regenerates the embedded mascot/nixie/settings assets and the SD backgrounds from tools/art/."""
 import os, struct, sys
 from PIL import Image, ImageDraw, ImageFilter, ImageChops

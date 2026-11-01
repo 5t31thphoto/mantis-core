@@ -1,5 +1,5 @@
 """Builds the default Music tile icon (64x64 RGB565 + alpha) from the extras icon sheet.
-Usage: python tools/music_icon_build.py src/ui/mantis_music_assets.h
+Usage: python tools/music_icon_build.py tools/generated/mantis_music_assets.h  (then: python tools/pack_assets.py)
 (/icons/mp3.mi on the SD card replaces it at runtime.)"""
 import os, sys
 from PIL import Image, ImageDraw
