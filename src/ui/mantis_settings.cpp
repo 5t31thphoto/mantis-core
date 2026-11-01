@@ -1,5 +1,7 @@
 // MantisCore settings, time settings, on-screen keyboard and dialogs.
+#include "../engine/app_registry.h"
 #include "../engine/globals.h"
+#include <esp_partition.h>
 #include "mantis_internal.h"
 #include <WiFi.h>
 #include <SD.h>
@@ -283,6 +285,7 @@ static void wifiScreen() {
                     mcNetStop();
                     mcCfg.ssid = mcCfg.pass = "";
                     mcConfigSave();
+                    mcSharedWifiSave();
                     return false;
                 }
                 idx--;
@@ -296,6 +299,7 @@ static void wifiScreen() {
             mcCfg.ssid = ssid;
             mcCfg.pass = pass;
             mcConfigSave();
+            mcSharedWifiSave();
             return false;
         },
         [](int, int) {});
@@ -318,9 +322,45 @@ static int countWallpapers() {
     return n;
 }
 
+// ------------------------------------------------------------------ installed apps
+static uint32_t partitionSize(const String &label, esp_partition_type_t type) {
+    const esp_partition_t *p = esp_partition_find_first(type, ESP_PARTITION_SUBTYPE_ANY, label.c_str());
+    return p ? p->size : 0;
+}
+
+static void installedAppsScreen() {
+    std::vector<LauncherAppMetadata> apps = launcherListInstalledApps();
+    std::vector<String> titles, sizes;
+    for (const LauncherAppMetadata &a : apps) { // app slot + its own data partitions
+        uint32_t bytes = partitionSize(a.label, ESP_PARTITION_TYPE_APP);
+        for (const String &fat : a.fatLabels) bytes += partitionSize(fat, ESP_PARTITION_TYPE_DATA);
+        if (a.spiffsLabel.length()) bytes += partitionSize(a.spiffsLabel, ESP_PARTITION_TYPE_DATA);
+        char b[16];
+        snprintf(b, sizeof(b), "%.1f MB", bytes / 1048576.0f);
+        titles.push_back(mcAppTitle(a.name));
+        sizes.push_back(b);
+    }
+    listScreen(
+        "Installed apps",
+        [&]() {
+            std::vector<McRow> rows;
+            for (size_t i = 0; i < apps.size(); i++) rows.push_back({titles[i], sizes[i], 0, 0});
+            if (apps.empty()) rows.push_back({String("No apps installed yet"), String(""), 2, 0});
+            return rows;
+        },
+        [&](int idx) {
+            if (idx < 0 || idx >= (int)apps.size()) return true;
+            if (mcActionSheet(titles[idx], {"Remove from device", "Cancel"}) == 0)
+                mcRemoveInstalledApp(apps[idx].label, apps[idx].name); // reboots when done
+            return true;
+        },
+        [](int, int) {});
+}
+
 // ------------------------------------------------------------------ settings
 void mcSettings() {
     int wallCount = countWallpapers();
+    int installedCount = (int)launcherListInstalledApps().size(); // read once, not every frame
     listScreen(
         "Settings",
         [&]() {
@@ -337,6 +377,7 @@ void mcSettings() {
             rows.push_back({"Next wallpaper", wallVal, 0, 0});
             rows.push_back({"Weather units", String(mcCfg.metric ? "C, km/h, mm" : "F, mph, in"), 0, 0});
             rows.push_back({"Charging mode", "", 0, 0});
+            rows.push_back({"Installed apps", String(installedCount), 0, 0});
             rows.push_back({"About", String("v" MANTISCORE_VERSION), 2, 0});
             return rows;
         },
@@ -374,7 +415,8 @@ void mcSettings() {
                     mcNetStart(); // refetch in the new units
                     break;
                 case 7: mcChargeMode(); break;
-                case 8: mcToast("MantisCore v" MANTISCORE_VERSION " by BasaltSoftworks", MC_GREEN, 1800); break;
+                case 8: installedAppsScreen(); break;
+                case 9: mcToast("MantisCore v" MANTISCORE_VERSION " by BasaltSoftworks", MC_GREEN, 1800); break;
             }
             return true;
         },

@@ -27,6 +27,8 @@ To build locally, run `pio run -e mantiscore`. It writes `mantiscore-merged.bin`
 | `/images/*.mg` | Wallpapers. Custom wallpapers go in `/images/backgrounds/*.mg` |
 | `/mantiscore/` | Nixie clock, weather screen and loading screen backgrounds |
 | `/backups/` | App data backups, created automatically |
+| `/music/` | MP3s for the built-in Music player (subfolders up to 2 levels deep) |
+| `/icons/mp3.mi` | Optional icon for the Music tile (replaces the built-in one) |
 
 ## Source
 - `src/main.cpp`: boot screen and boot flow.
@@ -36,3 +38,13 @@ To build locally, run `pio run -e mantiscore`. It writes `mantiscore-merged.bin`
 
 ## Weather screen
 Tap the weather in the home-screen header to open it, and tap anywhere to go back. Data comes from Open-Meteo: the forecast API, plus the air-quality API for AQI, PM2.5, PM10, CO and ozone. It refreshes every 15 minutes, and immediately when the data is more than 10 minutes old as you open the screen. Units (°F/mph/in or °C/km/h/mm) are set in Settings → Weather units.
+
+## Music player
+**Music** is built in and sits just before Settings on the home screen. It plays MP3s from `/music`, using the libhelix decoder and the Core2 speaker via `M5.Speaker`.
+
+- **Controls:** play/pause, previous (restarts the song if it's more than 3 s in), next, shuffle, a volume slider, drag-to-seek, and a playlist (the LIST button, or tap the song title).
+- **Sub-bass switch:** drives the vibration motor from the music's low end, below about 85 Hz.
+- **Track info:** titles come from ID3 tags when present, otherwise from the file name.
+- **Saved settings:** volume, shuffle, sub-bass and the last song are remembered.
+- **Background play:** music stops when you close the player with X.
+- `tools/music_icon_build.py` regenerates the default tile icon.

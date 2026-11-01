@@ -51,6 +51,8 @@ struct McConfig {
 extern McConfig mcCfg;
 void mcConfigLoad();
 void mcConfigSave();
+void mcSharedWifiLoad(); // /wifi_config.json on SD (shared with Mantis AI and MantisCam) -> mcCfg
+void mcSharedWifiSave(); // mcCfg ssid/pass -> /wifi_config.json, keeping other apps' keys
 struct McTimeZone { const char *name; const char *posix; };
 extern const McTimeZone mcTimeZones[];
 extern const int mcTimeZoneCount;
@@ -116,6 +118,9 @@ bool mcIsCharging();
 void mcNixieClock();
 void mcChargeMode();
 void mcSettings();
+void mcMusicPlayer(); // built-in MP3 player (/music)
+String mcAppTitle(const String &name);                          // label shown under an app icon
+void mcRemoveInstalledApp(const String &label, const String &name); // confirm, back up, remove (reboots)
 void mcTimeSettings();
 String mcKeyboard(const String &title, const String &initial, bool numeric, bool password);
 int mcActionSheet(const String &title, const std::vector<String> &options); // -1 = dismissed

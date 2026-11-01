@@ -2,6 +2,7 @@
 #include "mantis.h"
 #include "mantis_assets.h"
 #include "mantis_internal.h"
+#include <ArduinoJson.h>
 #include <Preferences.h>
 #include <SD.h>
 #include <sys/time.h>
@@ -200,6 +201,51 @@ void mcConfigSave() {
     p.putUShort("bgidx", mcCfg.bgIndex);
     p.putBool("metric", mcCfg.metric);
     p.end();
+}
+
+// Home Wi-Fi is shared between the Mantis apps through /wifi_config.json {"ssid","pass",...}
+// (the format Mantis AI already uses). The SD file wins over NVS, so another app can't leave us
+// with a stale or wrong network. Writes keep any other keys (e.g. Mantis AI's "server").
+static const char *SHARED_WIFI_PATH = "/wifi_config.json";
+
+void mcSharedWifiLoad() {
+    if (!SD.exists(SHARED_WIFI_PATH)) {
+        if (mcCfg.ssid.length()) mcSharedWifiSave(); // first run: publish ours for the other apps
+        return;
+    }
+    File f = SD.open(SHARED_WIFI_PATH, FILE_READ);
+    if (!f) return;
+    JsonDocument doc;
+    bool ok = !deserializeJson(doc, f);
+    f.close();
+    if (!ok) return;
+    String ssid = doc["ssid"] | "", pass = doc["pass"] | "";
+    if (ssid.length() && (ssid != mcCfg.ssid || pass != mcCfg.pass)) {
+        mcCfg.ssid = ssid;
+        mcCfg.pass = pass;
+        mcConfigSave();
+    }
+}
+
+void mcSharedWifiSave() {
+    JsonDocument doc;
+    File f = SD.open(SHARED_WIFI_PATH, FILE_READ);
+    if (f) {
+        deserializeJson(doc, f); // keep the other apps' keys
+        f.close();
+    }
+    if (mcCfg.ssid.length()) {
+        doc["ssid"] = mcCfg.ssid;
+        doc["pass"] = mcCfg.pass;
+    } else {
+        doc.remove("ssid");
+        doc.remove("pass");
+    }
+    f = SD.open(SHARED_WIFI_PATH, FILE_WRITE);
+    if (f) {
+        serializeJson(doc, f);
+        f.close();
+    }
 }
 
 void mcApplyBrightness() { M5.Display.setBrightness((uint8_t)(mcCfg.bright * 255 / 100)); }

@@ -5,6 +5,7 @@
 #include "mantis.h"
 #include "mantis_assets.h"
 #include "mantis_internal.h"
+#include "mantis_music_assets.h"
 #include <SD.h>
 #include <algorithm>
 #include <driver/gpio.h>
@@ -17,6 +18,7 @@ struct McApp {
     String title;     // label under the icon
     String installed; // partition label when installed
     McIcon icon;
+    int builtin = 0;  // 0 app on SD, 1 Settings, 2 Music
 };
 
 static std::vector<McApp> apps;
@@ -80,8 +82,15 @@ static void scanApps() {
         return x.title.compareTo(y.title) < 0 ? true : false;
     });
     for (McApp &a : apps) mcLoadIcon(("/icons/" + a.name + ".mi").c_str(), a.icon);
+    McApp m; // built-in music player; /icons/mp3.mi replaces its default icon
+    m.name = "mp3";
+    m.title = "Music";
+    m.builtin = 2;
+    mcLoadIcon("/icons/mp3.mi", m.icon);
+    apps.push_back(m);
     McApp s;
     s.title = "Settings";
+    s.builtin = 1;
     apps.push_back(s); // always last
     page = min(page, pageCount() - 1);
 }
@@ -139,8 +148,9 @@ static void drawPage(int p, int dx) {
         x += dx;
         if (x < -80 || x > MC_W) continue;
         McApp &a = apps[idx];
-        if (a.file.isEmpty()) mcBlitAlpha(x, y, 64, 64, SETTINGS_ICON_RGB, SETTINGS_ICON_A);
+        if (a.builtin == 1) mcBlitAlpha(x, y, 64, 64, SETTINGS_ICON_RGB, SETTINGS_ICON_A);
         else if (a.icon.rgb) mcBlitAlpha(x, y, 64, 64, a.icon.rgb, a.icon.a);
+        else if (a.builtin == 2) mcBlitAlpha(x, y, 64, 64, MUSIC_ICON_RGB, MUSIC_ICON_A);
         else drawFallbackIcon(a, x, y);
         mcText(a.title.c_str(), x + 32, y + 78, &fonts::Font2, MC_WHITE, middle_center, true);
     }
@@ -258,6 +268,17 @@ static void removeApp(McApp &a) {
     mcNetStart();
 }
 
+String mcAppTitle(const String &name) { return friendlyTitle(name); }
+
+void mcRemoveInstalledApp(const String &label, const String &name) {
+    McApp a;
+    a.name = name;
+    a.title = friendlyTitle(name);
+    a.installed = label;
+    a.file = "/" + name + ".bin";
+    removeApp(a);
+}
+
 static void appMenu(McApp &a) {
     if (a.file.isEmpty()) return;
     if (a.installed.isEmpty()) {
@@ -275,6 +296,7 @@ void mantisRun() {
     mcApplyTimeZone();
     mcTimeFromRtc();
     if (!sdcardMounted) setupSdCard();
+    mcSharedWifiLoad(); // before the net task starts
     scanApps();
     loadWallpaper();
     mcBackupQueueAfterApp();
@@ -360,10 +382,12 @@ void mantisRun() {
                     int idx = hitIcon(mcTouch.startX, mcTouch.startY);
                     if (idx >= 0) {
                         McApp &a = apps[idx];
-                        if (a.file.isEmpty()) {
+                        if (a.builtin == 1) {
                             mcSettings();
                             loadWallpaper();
                             mcApplyTimeZone();
+                        } else if (a.builtin == 2) {
+                            mcMusicPlayer();
                         } else {
                             launchApp(a);
                         }
