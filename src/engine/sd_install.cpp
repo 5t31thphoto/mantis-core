@@ -36,6 +36,25 @@ bool setupSdCard() {
 
 static String installedAppNameFromPath(const String &path) { return launcherInstallAppDisplayName(path); }
 
+// MantisCore: true when this app has a saved backup for `label` that holds real data (not just erased
+// flash). Used to decide whether an empty data partition from the .bin is worth creating at all.
+static bool previousBackupHasData(const String &path, const String &label) {
+    BackupInstallInfo prev = loadInstalledFromConfig(generateAppNum(path));
+    for (const auto &bp : prev.partitions) {
+        if (bp.label != label || bp.lastBackupPath.isEmpty()) continue;
+        File f = SDM.open(bp.lastBackupPath, FILE_READ);
+        if (!f) return false;
+        uint8_t buf[512];
+        for (int n; (n = f.read(buf, sizeof(buf))) > 0;) {
+            for (int i = 0; i < n; i++)
+                if (buf[i] != 0xFF) { f.close(); return true; }
+        }
+        f.close();
+        return false;
+    }
+    return false;
+}
+
 static bool flashRawFromSd(
     File &file, uint32_t sourceOffset, size_t imageSize, const LauncherPartitionEntry &target, bool appImage
 ) {
@@ -304,10 +323,10 @@ static bool installFromSdDynamic(
                         break;
                     }
                 }
-                if (!restored) {
-                    restored = restorePartitionFromBackup(bp.label.c_str(), bp.lastBackupPath.c_str());
-                }
-                if (!restored) { log_w("[Restore] Failed: %s", bp.label.c_str()); }
+                // MantisCore: no fallback lookup by label. If this install has no partition with that
+                // label, the backup belongs to a partition the app no longer has; a by-label lookup
+                // in the running table could hit another app's partition and overwrite it.
+                if (!restored) { log_w("[Restore] Skipped %s: not part of this install", bp.label.c_str()); }
             }
         }
     }
@@ -447,7 +466,14 @@ void updateFromSD(const String &path) {
                         dp.partitionSize
                     );
                 }
-                dataPartitions.push_back(dp);
+                // MantisCore: a data partition with nothing in the .bin is only worth flash if this app
+                // has stored real data in it before (then the backup is restored into it). Otherwise
+                // it is a ghost from a stock partition table - don't create it.
+                if (dp.copySize == 0 && !previousBackupHasData(path, dp.label)) {
+                    launcherConsolePrintf("Skipping empty %s partition: no data to keep\n", dp.label.c_str());
+                } else {
+                    dataPartitions.push_back(dp);
+                }
             }
 
             if (partitionEntry[0x02] == 0x01 && partitionEntry[3] == 0x81) {

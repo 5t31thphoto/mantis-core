@@ -23,6 +23,7 @@ enum class BkPhase { Idle, Hash, Copy };
 static std::vector<BkJob> jobs;
 static BkPhase phase = BkPhase::Idle;
 static uint32_t pos = 0, crc = 0;
+static bool blank = true; // every byte so far is 0xFF (erased, never used)
 static File out;
 static uint8_t *chunk = nullptr;
 static const size_t CHUNK = 16384;
@@ -104,6 +105,7 @@ void mcBackupStep(uint32_t budgetMs) {
             phase = BkPhase::Hash;
             pos = 0;
             crc = 0;
+            blank = true;
         }
         size_t n = min((uint32_t)CHUNK, j.size - pos);
         if (esp_flash_read(nullptr, chunk, j.addr + pos, n) != ESP_OK) {
@@ -112,14 +114,15 @@ void mcBackupStep(uint32_t budgetMs) {
         }
         if (phase == BkPhase::Hash) {
             crc = esp_rom_crc32_le(crc, chunk, n);
+            for (size_t i = 0; blank && i < n; i++) blank = chunk[i] == 0xFF;
             pos += n;
             if (pos >= j.size) {
                 Preferences p;
                 p.begin("mcbk", true);
                 bool same = p.getUInt(crcKey(j).c_str(), 0) == crc && SD.exists(jobPath(j));
                 p.end();
-                if (same && !j.force) {
-                    finishJob(true); // nothing changed since the last backup
+                if ((same && !j.force) || blank) {
+                    finishJob(true); // unchanged since the last backup, or erased flash with nothing to save
                     continue;
                 }
                 SD.mkdir("/backups");
