@@ -25,6 +25,8 @@ static std::vector<McApp> apps;
 static uint16_t *wall = nullptr;
 static int page = 0;
 static const int PER_PAGE = 8;
+static int movingIdx = -1;                       // tile being moved (move mode), -1 = none
+static const char *const ORDER_FILE = "/icons/order.txt"; // tile order, one app name per line
 static int batteryPct = -1;
 static bool charging = false;
 static uint32_t lastBatteryRead = 0;
@@ -56,8 +58,40 @@ static void freeApps() {
     apps.clear();
 }
 
+// Puts the tiles in the order saved in /icons/order.txt. Tiles not listed there (e.g. newly
+// added apps) keep their default order and go after the listed ones.
+static void applyOrder() {
+    File f = SD.open(ORDER_FILE);
+    if (!f) return;
+    std::vector<String> keys;
+    while (f.available()) {
+        String k = f.readStringUntil('\n');
+        k.trim();
+        if (k.length()) keys.push_back(k);
+    }
+    f.close();
+    auto rank = [&](const McApp &a) {
+        for (size_t i = 0; i < keys.size(); i++)
+            if (keys[i] == a.name) return (int)i;
+        return (int)keys.size();
+    };
+    std::stable_sort(apps.begin(), apps.end(), [&](const McApp &x, const McApp &y) { return rank(x) < rank(y); });
+}
+
+static void saveOrder() {
+    if (!SD.exists("/icons")) SD.mkdir("/icons");
+    File f = SD.open(ORDER_FILE, FILE_WRITE);
+    if (!f) {
+        mcToast("Couldn't save the order to the SD card", 0xF800);
+        return;
+    }
+    for (const McApp &a : apps) f.println(a.name);
+    f.close();
+}
+
 static void scanApps() {
     freeApps();
+    movingIdx = -1;
     std::vector<LauncherAppMetadata> installed = launcherListInstalledApps();
     File root = SD.open("/");
     if (root) {
@@ -95,10 +129,12 @@ static void scanApps() {
     mcLoadIcon("/icons/mp3.mi", m.icon);
     apps.push_back(m);
     McApp s; // /icons/settings.mi replaces its default icon
+    s.name = "settings"; // its key in /icons/order.txt
     s.title = "Settings";
     s.builtin = 1;
     mcLoadIcon("/icons/settings.mi", s.icon);
-    apps.push_back(s); // always last
+    apps.push_back(s); // last unless /icons/order.txt says otherwise
+    applyOrder();
     page = min(page, pageCount() - 1);
 }
 
@@ -155,6 +191,10 @@ static void drawPage(int p, int dx) {
         x += dx;
         if (x < -80 || x > MC_W) continue;
         McApp &a = apps[idx];
+        if (idx == movingIdx) { // move mode: outline the tile being moved
+            mcCanvas.fillSmoothRoundRect(x - 4, y - 4, 72, 72, 17, MC_GREEN);
+            mcCanvas.fillSmoothRoundRect(x - 1, y - 1, 66, 66, 15, MC_CHARCOAL);
+        }
         if (a.icon.rgb) mcBlitAlpha(x, y, 64, 64, a.icon.rgb, a.icon.a); // an SD icon always wins
         else if (a.builtin == 1 && SETTINGS_ICON_RGB) mcBlitAlpha(x, y, 64, 64, SETTINGS_ICON_RGB, SETTINGS_ICON_A);
         else if (a.builtin == 2 && MUSIC_ICON_RGB) mcBlitAlpha(x, y, 64, 64, MUSIC_ICON_RGB, MUSIC_ICON_A);
@@ -217,6 +257,12 @@ static void render(int dx) {
     if (dx > 0 && page > 0) drawPage(page - 1, dx - MC_W);
     if (dx < 0 && page < pageCount() - 1) drawPage(page + 1, dx + MC_W);
     drawHeader();
+    if (movingIdx >= 0 && movingIdx < (int)apps.size()) { // move mode replaces the header
+        mcCanvas.fillRect(0, 0, MC_W, MC_HEADER_H, MC_PURPLE);
+        String hint = "Tap where " + apps[movingIdx].title + " goes";
+        mcText(hint.c_str(), 8, MC_HEADER_H / 2 + 1, &fonts::Font2, MC_WHITE, middle_left);
+        mcText("DONE", MC_W - 8, MC_HEADER_H / 2 + 1, &fonts::FreeSansBold9pt7b, MC_GREEN, middle_right);
+    }
     int pc = pageCount();
     if (pc > 1)
         for (int i = 0; i < pc; i++) {
@@ -228,16 +274,25 @@ static void render(int dx) {
     mcPush();
 }
 
-static int hitIcon(int x, int y) {
+// slot under (x, y) on the current page, filled or not; -1 = none
+static int hitSlot(int x, int y) {
     for (int i = 0; i < PER_PAGE; i++) {
         int ix, iy;
         iconXY(i, ix, iy);
-        if (x >= ix - 6 && x < ix + 70 && y >= iy - 4 && y < iy + 90) {
-            int idx = page * PER_PAGE + i;
-            return idx < (int)apps.size() ? idx : -1;
-        }
+        if (x >= ix - 6 && x < ix + 70 && y >= iy - 4 && y < iy + 90) return page * PER_PAGE + i;
     }
     return -1;
+}
+
+static int hitIcon(int x, int y) {
+    int idx = hitSlot(x, y);
+    return idx < (int)apps.size() ? idx : -1;
+}
+
+// move tile `from` to position `to` (the tiles in between shift over by one)
+static void moveTile(int from, int to) {
+    if (from < to) std::rotate(apps.begin() + from, apps.begin() + from + 1, apps.begin() + to + 1);
+    else std::rotate(apps.begin() + to, apps.begin() + from, apps.begin() + from + 1);
 }
 
 // ------------------------------------------------------------------ actions
@@ -286,13 +341,16 @@ void mcRemoveInstalledApp(const String &label, const String &name) {
     removeApp(a);
 }
 
-static void appMenu(McApp &a) {
-    if (a.file.isEmpty()) return;
-    if (a.installed.isEmpty()) {
-        mcToast(a.title + " installs on first launch");
-        return;
-    }
-    if (mcActionSheet(a.title, {"Remove from device", "Cancel"}) == 0) removeApp(a);
+// long-press menu; returns true to start moving the tile
+static bool appMenu(McApp &a) {
+    bool canRemove = !a.file.isEmpty() && !a.installed.isEmpty();
+    std::vector<String> opts = {"Move"};
+    if (canRemove) opts.push_back("Remove from device");
+    opts.push_back("Cancel");
+    int c = mcActionSheet(a.title, opts);
+    if (c == 0) return true;
+    if (canRemove && c == 1) removeApp(a);
+    return false;
 }
 
 // ------------------------------------------------------------------ home loop
@@ -353,6 +411,7 @@ void mantisRun() {
             }
             if (!mcTouch.moved && !mcTouch.longFired && now - mcTouch.downAt > 600) {
                 mcTouch.longFired = true;
+                if (movingIdx >= 0) continue; // move mode: long presses do nothing
                 if (inHeader && mcTouch.startX < 120) {
                     mcWaitRelease();
                     mcTimeSettings();
@@ -361,7 +420,7 @@ void mantisRun() {
                     int idx = hitIcon(mcTouch.startX, mcTouch.startY);
                     if (idx >= 0) {
                         mcWaitRelease();
-                        appMenu(apps[idx]);
+                        if (appMenu(apps[idx])) movingIdx = idx;
                         render(0);
                     }
                 }
@@ -377,6 +436,20 @@ void mantisRun() {
                 int end = (target - page) * -MC_W;
                 for (int s = 1; s <= 6; s++) render(dx + (end - dx) * s / 6);
                 page = target;
+                render(0);
+            } else if (!mcTouch.moved && !mcTouch.longFired && movingIdx >= 0) {
+                if (inHeader) movingIdx = -1; // DONE
+                else {
+                    int slot = hitSlot(mcTouch.startX, mcTouch.startY);
+                    if (slot >= 0) {
+                        int to = min(slot, (int)apps.size() - 1); // an empty slot = the end
+                        if (to != movingIdx) {
+                            moveTile(movingIdx, to);
+                            saveOrder();
+                        }
+                        movingIdx = -1;
+                    }
+                }
                 render(0);
             } else if (!mcTouch.moved && !mcTouch.longFired) {
                 if (inHeader && mcTouch.startX < 120) {

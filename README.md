@@ -30,6 +30,7 @@ To build locally, run `pio run -e mantiscore`. It writes `mantiscore-merged.bin`
 | `/music/` | MP3s for the built-in Music player (subfolders up to 2 levels deep) |
 | `/icons/mp3.mi` | Optional icon for the Music tile (replaces the built-in one) |
 | `/icons/settings.mi` | Optional icon for the Settings tile (replaces the built-in one) |
+| `/icons/order.txt` | Home screen tile order, one app name per line (`settings`, `mp3`, `strider` for the built-ins). Written by **Move**: long-press a tile, choose Move, then tap where it goes. Apps not listed go at the end |
 
 ## Strider
 **Strider** is built in, next to Music. Walk or ride with the Core2 and it turns the trip into a print saved to `/images/strider/` as `.mg`, the format Mantis Gallery reads.
