@@ -29,6 +29,7 @@ To build locally, run `pio run -e mantiscore`. It writes `mantiscore-merged.bin`
 | `/backups/` | App data backups, created automatically |
 | `/music/` | MP3s for the built-in Music player (subfolders up to 2 levels deep) |
 | `/icons/mp3.mi` | Optional icon for the Music tile (replaces the built-in one) |
+| `/icons/settings.mi` | Optional icon for the Settings tile (replaces the built-in one) |
 
 ## Strider
 **Strider** is built in, next to Music. Walk or ride with the Core2 and it turns the trip into a print saved to `/images/strider/` as `.mg`, the format Mantis Gallery reads.

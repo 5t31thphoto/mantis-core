@@ -94,9 +94,10 @@ static void scanApps() {
     m.builtin = 2;
     mcLoadIcon("/icons/mp3.mi", m.icon);
     apps.push_back(m);
-    McApp s;
+    McApp s; // /icons/settings.mi replaces its default icon
     s.title = "Settings";
     s.builtin = 1;
+    mcLoadIcon("/icons/settings.mi", s.icon);
     apps.push_back(s); // always last
     page = min(page, pageCount() - 1);
 }
@@ -154,8 +155,8 @@ static void drawPage(int p, int dx) {
         x += dx;
         if (x < -80 || x > MC_W) continue;
         McApp &a = apps[idx];
-        if (a.builtin == 1 && SETTINGS_ICON_RGB) mcBlitAlpha(x, y, 64, 64, SETTINGS_ICON_RGB, SETTINGS_ICON_A);
-        else if (a.icon.rgb) mcBlitAlpha(x, y, 64, 64, a.icon.rgb, a.icon.a);
+        if (a.icon.rgb) mcBlitAlpha(x, y, 64, 64, a.icon.rgb, a.icon.a); // an SD icon always wins
+        else if (a.builtin == 1 && SETTINGS_ICON_RGB) mcBlitAlpha(x, y, 64, 64, SETTINGS_ICON_RGB, SETTINGS_ICON_A);
         else if (a.builtin == 2 && MUSIC_ICON_RGB) mcBlitAlpha(x, y, 64, 64, MUSIC_ICON_RGB, MUSIC_ICON_A);
         else drawFallbackIcon(a, x, y);
         mcText(a.title.c_str(), x + 32, y + 78, &fonts::Font2, MC_WHITE, middle_center, true);
