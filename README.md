@@ -58,6 +58,7 @@ Tap the weather in the home-screen header to open it, and tap anywhere to go bac
 ## Music player
 **Music** is built in and sits just before Settings on the home screen. It plays MP3s from `/music`, using the libhelix decoder and the Core2 speaker via `M5.Speaker`.
 
+- **Converting music:** `tools/mp3_converter/mantis_mp3_converter.py` is a standalone tkinter app. It needs ffmpeg. It converts any audio files into the format the player handles best: 44.1 kHz, constant bitrate, mono by default, ID3v2.3 title and artist, no cover art. Point its output at the SD card's `/music`.
 - **Smooth playback:** the SD card shares the SPI bus with the screen, so the audio path is split in three. An SD reader task keeps a 128 KB buffer (PSRAM) of the MP3 topped up in short 4 KB reads. The decoder task works only from that buffer, so it never waits for the bus. The screen is pushed in 24-row strips, and only the parts that changed are sent. The spectrum analyser's FFT runs on the UI core: the decoder just tags each buffer with the time it will be heard, so the visuals and sub-bass motor stay in step with the speaker.
 
 - **Controls:** play/pause, previous (restarts the song if it's more than 3 s in), next, shuffle, a volume slider, drag-to-seek, and a playlist (the LIST button, or tap the song title).

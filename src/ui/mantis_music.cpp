@@ -416,7 +416,8 @@ static void audioLoop(void *) {
             }
             unlockBus();
             fileOk = (bool)audioFile;
-            rHead = rTail = 0;
+            rHead = 0;
+            rTail = 0;
             fileEof = !fileOk;
             xSemaphoreGive(fileLock);
 
@@ -444,7 +445,8 @@ static void audioLoop(void *) {
                 lockBus();
                 audioFile.seek(dataStart + (uint32_t)((dataEnd - dataStart) * seek));
                 unlockBus();
-                rHead = rTail = 0;
+                rHead = 0;
+                rTail = 0;
                 fileEof = false;
                 xSemaphoreGive(fileLock);
                 decoder.end();
@@ -796,7 +798,8 @@ void mcMusicPlayer() {
     pendingCut = false;
     pendingSeek = -1;
     trackEnded = false;
-    rHead = rTail = 0;
+    rHead = 0;
+    rTail = 0;
     fileEof = true;
     clearSnaps();
     vib = 0;
