@@ -18,7 +18,7 @@ struct McApp {
     String title;     // label under the icon
     String installed; // partition label when installed
     McIcon icon;
-    int builtin = 0;  // 0 app on SD, 1 Settings, 2 Music
+    int builtin = 0;  // 0 app on SD, 1 Settings, 2 Music, 3 Strider
 };
 
 static std::vector<McApp> apps;
@@ -82,6 +82,12 @@ static void scanApps() {
         return x.title.compareTo(y.title) < 0 ? true : false;
     });
     for (McApp &a : apps) mcLoadIcon(("/icons/" + a.name + ".mi").c_str(), a.icon);
+    McApp st; // built-in Strider; /icons/strider.mi replaces its drawn icon
+    st.name = "strider";
+    st.title = "Strider";
+    st.builtin = 3;
+    if (!mcLoadIcon("/icons/strider.mi", st.icon)) mcStriderIcon(st.icon);
+    apps.push_back(st);
     McApp m; // built-in music player; /icons/mp3.mi replaces its default icon
     m.name = "mp3";
     m.title = "Music";
@@ -388,6 +394,8 @@ void mantisRun() {
                             mcApplyTimeZone();
                         } else if (a.builtin == 2) {
                             mcMusicPlayer();
+                        } else if (a.builtin == 3) {
+                            mcStrider();
                         } else {
                             launchApp(a);
                         }

@@ -119,6 +119,8 @@ void mcNixieClock();
 void mcChargeMode();
 void mcSettings();
 void mcMusicPlayer(); // built-in MP3 player (/music)
+void mcStrider();     // built-in walk/ride art app (prints to /images/strider)
+bool mcStriderIcon(McIcon &icon); // its default home-screen icon
 String mcAppTitle(const String &name);                          // label shown under an app icon
 void mcRemoveInstalledApp(const String &label, const String &name); // confirm, back up, remove (reboots)
 void mcTimeSettings();

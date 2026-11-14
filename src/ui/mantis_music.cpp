@@ -1,14 +1,20 @@
 // MantisCore music player ("MantisAmp"): MP3s from /music on the SD card, Winamp-style.
 //
-// Audio path: SD -> libhelix MP3 decoder -> PcmSink -> M5.Speaker.playRaw (triple buffer, the
-// pattern from M5Unified's own MP3 example). Decoding runs in its own task on core 0; the UI only
-// sends commands (open / seek / play / pause) and reads status.
+// Audio path (three stages, so the screen can never starve the speaker):
+//   SD card --[mcSdRead task]--> compressed ring buffer (128 KB PSRAM, seconds of audio)
+//           --[mcAudio task]---> libhelix MP3 decoder -> PcmSink -> M5.Speaker.playRaw (triple buffer)
 //
-// The SD card shares the SPI bus with the display on the Core2, so SD reads (audio task) and
-// display pushes (UI task) take the same mutex. Playback stops when the player is closed.
+// The SD card shares the SPI bus with the display on the Core2, so SD reads and display pushes take
+// the same mutex. Only the reader task touches the card, in short 4 KB reads; the decoder only reads
+// the ring buffer and never waits for the bus. The UI pushes the screen in 24-row strips and releases
+// the bus between strips, so neither side holds it for more than a few milliseconds.
+//
+// Visuals: the decoder only copies 256 mono samples per PCM buffer, stamped with the time that
+// buffer will actually be heard. The UI task (other core) runs the FFT for the spectrum analyser,
+// so the analyser costs the audio path nothing and stays in step with what you hear.
 //
 // Sub-bass haptics: a low-pass filter (~85 Hz) on the decoded audio drives the Core2 vibration
-// motor, so you feel the kick drum. Toggle with the SUB switch.
+// motor, so you feel the kick drum. Toggle with the SUB switch. Playback stops when the player closes.
 #include "mantis_internal.h"
 #include <MP3DecoderHelix.h>
 #include <Preferences.h>
@@ -28,11 +34,13 @@ using namespace libhelix;
 #define MC_TEAL_DK 0x01C7
 
 // ------------------------------------------------------------------ shared state
-static SemaphoreHandle_t busLock = nullptr; // SD card + display (same SPI bus)
-static TaskHandle_t audioTask = nullptr;
+static SemaphoreHandle_t busLock = nullptr;  // SD card + display (same SPI bus)
+static SemaphoreHandle_t fileLock = nullptr; // audioFile, data range and ring reset (reader vs. decoder)
+static TaskHandle_t audioTask = nullptr, readerTask = nullptr;
 static volatile bool audioQuit = false;
 static volatile bool playing = false;
 static volatile int pendingOpen = -1;       // track index to open
+static volatile bool pendingCut = false;    // drop audio already queued in the speaker (user action)
 static volatile float pendingSeek = -1;     // 0..1
 static volatile bool trackEnded = false;
 
@@ -43,22 +51,120 @@ static int current = -1;
 static volatile uint32_t playedFrames = 0, durationFrames = 0;
 static volatile uint32_t sampleRate = 44100, bitrate = 0;
 static volatile uint8_t channels = 2;
-static volatile uint8_t bass = 0;           // 0..255 sub-bass envelope
-static volatile uint8_t bands[20];          // spectrum 0..255
-static char trackTitle[96] = "";            // guarded by busLock
+static portMUX_TYPE titleMux = portMUX_INITIALIZER_UNLOCKED;
+static char trackTitle[96] = "";            // guarded by titleMux
 
 // settings
 static uint8_t volumePct = 70;
 static bool shuffle = false, haptic = true;
 static std::vector<int> history;            // for PREV in shuffle mode
+static uint8_t vib = 0;                     // current motor level
 
 static void lockBus() { xSemaphoreTake(busLock, portMAX_DELAY); }
 static void unlockBus() { xSemaphoreGive(busLock); }
 
-static void pushLocked() {
-    lockBus();
-    mcPush();
-    unlockBus();
+// Push canvas rows [y0, y1) in short strips, giving the SD reader the bus between strips.
+static void pushRows(int y0, int y1) {
+    const int STRIP = 24; // 24 x 320 px = 15 KB, ~4 ms on the bus
+    for (int y = y0; y < y1; y += STRIP) {
+        int h = std::min(STRIP, y1 - y);
+        lockBus();
+        M5.Display.setClipRect(0, y, MC_W, h);
+        mcCanvas.pushSprite(0, 0); // only the clipped rows are sent
+        M5.Display.waitDMA();
+        M5.Display.clearClipRect();
+        unlockBus();
+    }
+}
+
+// ------------------------------------------------------------------ compressed ring buffer
+// Single producer (reader task) / single consumer (audio task), both pinned to core 0.
+// Counters run freely; size is a power of two so (counter & mask) is the offset.
+static uint8_t *ring = nullptr;
+static uint32_t ringSize = 0;
+static volatile uint32_t rHead = 0, rTail = 0;
+static volatile bool fileEof = true;        // reader reached dataEnd (set after the last bytes are published)
+static File audioFile;                      // guarded by fileLock
+static uint32_t dataStart = 0, dataEnd = 0; // MP3 data range without ID3 tags, guarded by fileLock
+static constexpr uint32_t STAGE = 4096;     // bytes per SD read
+static uint8_t stage[STAGE];                // internal RAM landing buffer for SD reads
+
+static bool ringAlloc() {
+    if (ring) return true;
+    ringSize = 128 * 1024;
+    ring = (uint8_t *)heap_caps_malloc(ringSize, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!ring) {
+        ringSize = 32 * 1024;
+        ring = (uint8_t *)heap_caps_malloc(ringSize, MALLOC_CAP_8BIT);
+    }
+    if (!ring) ringSize = 0;
+    return ring != nullptr;
+}
+static void ringFree() {
+    free(ring);
+    ring = nullptr;
+    ringSize = 0;
+}
+
+static void readerLoop(void *) {
+    while (!audioQuit) {
+        bool busy = false;
+        xSemaphoreTake(fileLock, portMAX_DELAY);
+        if (audioFile && !fileEof && ringSize - (rHead - rTail) >= STAGE) {
+            lockBus();
+            uint32_t pos = audioFile.position();
+            int n = pos < dataEnd ? audioFile.read(stage, std::min<uint32_t>(STAGE, dataEnd - pos)) : 0;
+            unlockBus();
+            if (n <= 0) {
+                fileEof = true;
+            } else {
+                uint32_t off = rHead & (ringSize - 1), first = std::min<uint32_t>(n, ringSize - off);
+                memcpy(ring + off, stage, first);
+                if ((uint32_t)n > first) memcpy(ring, stage + first, n - first);
+                __sync_synchronize();
+                rHead = rHead + n;
+                busy = true;
+            }
+        }
+        xSemaphoreGive(fileLock);
+        vTaskDelay(busy ? 1 : pdMS_TO_TICKS(8));
+    }
+    readerTask = nullptr;
+    vTaskDelete(nullptr);
+}
+
+// ------------------------------------------------------------------ analyser snapshots
+// One per PCM buffer handed to the speaker: 256 mono samples + sub-bass level, stamped with the
+// millis() at which that buffer starts to be heard. The UI shows the one playing right now.
+static constexpr int FFT_N = 256;
+static constexpr int SNAPS = 8;
+struct Snap {
+    volatile uint32_t at = 0;  // 0 = empty
+    volatile uint32_t dur = 0; // ms
+    volatile uint8_t bass = 0; // 0..255
+    int16_t mono[FFT_N];
+};
+static Snap snaps[SNAPS];
+static volatile uint32_t snapCount = 0;
+
+static void clearSnaps() {
+    for (auto &s : snaps) s.at = 0;
+}
+
+// index of the snapshot being heard at `now`, or -1
+static int pickSnap(uint32_t now) {
+    int best = -1;
+    int32_t bestAge = INT32_MAX;
+    for (int i = 0; i < SNAPS; i++) {
+        uint32_t at = snaps[i].at;
+        if (!at) continue;
+        int32_t age = (int32_t)(now - at);
+        if (age >= 0 && age < (int32_t)snaps[i].dur + 120 && age < bestAge) {
+            best = i;
+            bestAge = age;
+        }
+    }
+    return best;
 }
 
 // ------------------------------------------------------------------ PCM sink -> speaker
@@ -71,12 +177,15 @@ class PcmSink : public Print {
     int16_t *buf[3] = {nullptr, nullptr, nullptr};
     size_t fill = 0;
     int idx = 0;
-    float lp = 0;   // sub-bass low-pass state
-    float env = 0;  // its envelope over the current buffer
+    float lp = 0;            // sub-bass low-pass state
+    float env = 0;           // its envelope over the current buffer
+    uint32_t playEnd = 0;    // millis() when the audio queued so far runs out
+    uint32_t outLatency = 0; // ms of I2S DMA buffering between the speaker queue and the cone
 
     bool begin() {
         for (auto &b : buf) {
             if (!b) b = (int16_t *)heap_caps_malloc(PCM_BUF * sizeof(int16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+            if (!b) b = (int16_t *)heap_caps_malloc(PCM_BUF * sizeof(int16_t), MALLOC_CAP_8BIT);
             if (!b) return false;
         }
         fill = 0;
@@ -112,59 +221,101 @@ class PcmSink : public Print {
     }
     void flush() {
         if (!fill) return;
-        while (M5.Speaker.isPlaying(SPK_CH) == 2) vTaskDelay(1); // one playing + one queued: wait
+        while (M5.Speaker.isPlaying(SPK_CH) == 2) { // one playing + one queued: wait for a slot
+            if (audioQuit) return;
+            vTaskDelay(1);
+        }
+        uint32_t now = millis();
+        bool idle = M5.Speaker.isPlaying(SPK_CH) == 0;
         M5.Speaker.playRaw(buf[idx], fill, sampleRate, channels == 2, 1, SPK_CH, false);
-        analyse(buf[idx], fill);
-        bass = (uint8_t)std::min(255.0f, env / 9000.0f * 255.0f);
+        uint32_t ch = channels ? channels : 2, frames = fill / ch;
+        uint32_t start = (idle || (int32_t)(playEnd - now) < 0) ? now : playEnd;
+        uint32_t dur = (uint32_t)((uint64_t)frames * 1000 / (sampleRate ? sampleRate : 44100));
+        playEnd = start + dur;
+        snapshot(buf[idx], frames, ch, start + outLatency, dur);
         env = 0;
         fill = 0;
         idx = (idx + 1) % 3;
     }
+    // drop everything queued (seek, skip): the new audio starts right away
+    void cut() {
+        M5.Speaker.stop(SPK_CH);
+        fill = 0;
+        env = 0;
+        playEnd = millis();
+        clearSnaps();
+    }
 
   private:
-    // 256-point FFT of the mono mix -> 20 log-spaced bands for the analyser
-    void analyse(const int16_t *s, size_t n) {
-        static float re[256], im[256];
-        const int N = 256, ch = channels;
-        if (n < (size_t)(N * ch)) return;
-        for (int i = 0; i < N; i++) {
-            float v = ch == 2 ? (s[2 * i] + s[2 * i + 1]) * 0.5f : s[i];
-            float w = 0.5f - 0.5f * cosf(2 * (float)M_PI * i / (N - 1)); // Hann window
-            re[i] = v * w;
-            im[i] = 0;
+    void snapshot(const int16_t *s, uint32_t frames, uint32_t ch, uint32_t at, uint32_t dur) {
+        Snap &p = snaps[snapCount % SNAPS];
+        p.at = 0; // invalid while rewritten
+        uint32_t first = frames > (uint32_t)FFT_N ? (frames - FFT_N) / 2 : 0;
+        for (int i = 0; i < FFT_N; i++) {
+            uint32_t k = first + i;
+            p.mono[i] = k >= frames ? 0 : ch == 2 ? (int16_t)((s[2 * k] + s[2 * k + 1]) / 2) : s[k];
         }
-        for (int i = 1, j = 0; i < N; i++) { // bit reversal
-            int bit = N >> 1;
-            for (; j & bit; bit >>= 1) j ^= bit;
-            j ^= bit;
-            if (i < j) { std::swap(re[i], re[j]); std::swap(im[i], im[j]); }
-        }
-        for (int len = 2; len <= N; len <<= 1) {
-            float ang = -2 * (float)M_PI / len, wr = cosf(ang), wi = sinf(ang);
-            for (int i = 0; i < N; i += len) {
-                float cr = 1, ci = 0;
-                for (int k = 0; k < len / 2; k++) {
-                    float ur = re[i + k], ui = im[i + k];
-                    float vr = re[i + k + len / 2] * cr - im[i + k + len / 2] * ci;
-                    float vi = re[i + k + len / 2] * ci + im[i + k + len / 2] * cr;
-                    re[i + k] = ur + vr; im[i + k] = ui + vi;
-                    re[i + k + len / 2] = ur - vr; im[i + k + len / 2] = ui - vi;
-                    float t = cr * wr - ci * wi; ci = cr * wi + ci * wr; cr = t;
-                }
-            }
-        }
-        for (int b = 0; b < 20; b++) { // bins 1..127, log spaced
-            int lo = (int)powf(127.0f, b / 20.0f), hi = std::max(lo + 1, (int)powf(127.0f, (b + 1) / 20.0f));
-            float m = 0;
-            for (int k = lo; k < hi && k < 128; k++) m = std::max(m, sqrtf(re[k] * re[k] + im[k] * im[k]));
-            float db = 20 * log10f(m + 1) - 60; // ~0..60 dB useful range
-            bands[b] = (uint8_t)std::max(0.0f, std::min(255.0f, db * 255.0f / 60.0f));
-        }
+        p.bass = (uint8_t)std::min(255.0f, env / 9000.0f * 255.0f);
+        p.dur = dur;
+        p.at = at ? at : 1;
+        snapCount = snapCount + 1;
     }
 };
 
 static PcmSink sink;
 static MP3DecoderHelix decoder(sink);
+
+// ------------------------------------------------------------------ spectrum (UI task)
+// 256-point FFT of the mono snapshot -> 20 log-spaced bands for the analyser
+static float hannWin[FFT_N];
+static uint8_t bandLo[20], bandHi[20];
+
+static void initAnalyser() {
+    static bool ready = false;
+    if (ready) return;
+    for (int i = 0; i < FFT_N; i++) hannWin[i] = 0.5f - 0.5f * cosf(2 * (float)M_PI * i / (FFT_N - 1));
+    for (int b = 0; b < 20; b++) { // bins 1..127, log spaced
+        int lo = (int)powf(127.0f, b / 20.0f), hi = std::max(lo + 1, (int)powf(127.0f, (b + 1) / 20.0f));
+        bandLo[b] = lo;
+        bandHi[b] = std::min(hi, 128);
+    }
+    ready = true;
+}
+
+static void analyse(const int16_t *s, uint8_t *bands) {
+    static float re[FFT_N], im[FFT_N];
+    const int N = FFT_N;
+    for (int i = 0; i < N; i++) {
+        re[i] = s[i] * hannWin[i];
+        im[i] = 0;
+    }
+    for (int i = 1, j = 0; i < N; i++) { // bit reversal
+        int bit = N >> 1;
+        for (; j & bit; bit >>= 1) j ^= bit;
+        j ^= bit;
+        if (i < j) { std::swap(re[i], re[j]); std::swap(im[i], im[j]); }
+    }
+    for (int len = 2; len <= N; len <<= 1) {
+        float ang = -2 * (float)M_PI / len, wr = cosf(ang), wi = sinf(ang);
+        for (int i = 0; i < N; i += len) {
+            float cr = 1, ci = 0;
+            for (int k = 0; k < len / 2; k++) {
+                float ur = re[i + k], ui = im[i + k];
+                float vr = re[i + k + len / 2] * cr - im[i + k + len / 2] * ci;
+                float vi = re[i + k + len / 2] * ci + im[i + k + len / 2] * cr;
+                re[i + k] = ur + vr; im[i + k] = ui + vi;
+                re[i + k + len / 2] = ur - vr; im[i + k + len / 2] = ui - vi;
+                float t = cr * wr - ci * wi; ci = cr * wi + ci * wr; cr = t;
+            }
+        }
+    }
+    for (int b = 0; b < 20; b++) {
+        float m = 0;
+        for (int k = bandLo[b]; k < bandHi[b]; k++) m = std::max(m, re[k] * re[k] + im[k] * im[k]);
+        float db = 10 * log10f(m + 1) - 60; // power -> dB; ~0..60 dB useful range
+        bands[b] = (uint8_t)std::max(0.0f, std::min(255.0f, db * 255.0f / 60.0f));
+    }
+}
 
 // ------------------------------------------------------------------ files and tags
 static void scanTracks(const char *dir, int depth) {
@@ -235,33 +386,47 @@ static uint32_t readId3(File &f, String &artist, String &title) {
     return size;
 }
 
-// ------------------------------------------------------------------ audio task
+// ------------------------------------------------------------------ audio (decoder) task
 static void audioLoop(void *) {
-    File f;
-    uint32_t dataStart = 0, dataEnd = 0;
-    static uint8_t chunk[1024];
+    bool fileOk = false;
     while (!audioQuit) {
         int open = pendingOpen;
         if (open >= 0) {
             pendingOpen = -1;
+            if (pendingCut) {
+                pendingCut = false;
+                sink.cut();
+            }
             String artist, title;
+            xSemaphoreTake(fileLock, portMAX_DELAY);
             lockBus();
-            if (f) f.close();
-            f = SD.open(tracks[open], FILE_READ);
+            if (audioFile) audioFile.close();
+            audioFile = SD.open(tracks[open], FILE_READ);
             dataStart = dataEnd = 0;
-            if (f) {
-                dataStart = readId3(f, artist, title);
-                dataEnd = f.size();
+            if (audioFile) {
+                dataStart = readId3(audioFile, artist, title);
+                dataEnd = audioFile.size();
                 if (dataEnd > 128) { // ID3v1 tag at the end
                     uint8_t t[3];
-                    f.seek(dataEnd - 128);
-                    if (f.read(t, 3) == 3 && !memcmp(t, "TAG", 3)) dataEnd -= 128;
+                    audioFile.seek(dataEnd - 128);
+                    if (audioFile.read(t, 3) == 3 && !memcmp(t, "TAG", 3)) dataEnd -= 128;
                 }
-                f.seek(dataStart);
+                if (dataStart > dataEnd) dataStart = dataEnd;
+                audioFile.seek(dataStart);
             }
-            String shown = title.length() ? (artist.length() ? artist + " - " + title : title) : baseName(tracks[open]);
-            snprintf(trackTitle, sizeof(trackTitle), "%s", shown.c_str());
             unlockBus();
+            fileOk = (bool)audioFile;
+            rHead = rTail = 0;
+            fileEof = !fileOk;
+            xSemaphoreGive(fileLock);
+
+            String shown = title.length() ? (artist.length() ? artist + " - " + title : title) : baseName(tracks[open]);
+            char t[sizeof(trackTitle)];
+            snprintf(t, sizeof(t), "%s", shown.c_str());
+            portENTER_CRITICAL(&titleMux);
+            memcpy(trackTitle, t, sizeof(trackTitle));
+            portEXIT_CRITICAL(&titleMux);
+
             decoder.end();
             decoder.begin();
             sink.fill = 0;
@@ -271,38 +436,50 @@ static void audioLoop(void *) {
             trackEnded = false;
         }
         float seek = pendingSeek;
-        if (seek >= 0 && f) {
+        if (seek >= 0) {
             pendingSeek = -1;
-            lockBus();
-            f.seek(dataStart + (uint32_t)((dataEnd - dataStart) * seek));
-            unlockBus();
-            decoder.end();
-            decoder.begin();
-            sink.fill = 0;
-            playedFrames = (uint32_t)(durationFrames * seek);
+            if (fileOk) {
+                sink.cut();
+                xSemaphoreTake(fileLock, portMAX_DELAY);
+                lockBus();
+                audioFile.seek(dataStart + (uint32_t)((dataEnd - dataStart) * seek));
+                unlockBus();
+                rHead = rTail = 0;
+                fileEof = false;
+                xSemaphoreGive(fileLock);
+                decoder.end();
+                decoder.begin();
+                playedFrames = (uint32_t)(durationFrames * seek);
+            }
         }
-        if (!playing || !f) {
+        if (!playing) {
             vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
+        if (!fileOk) { // unreadable file: stop rather than spin
+            playing = false;
             continue;
         }
         if (bitrate > 0 && durationFrames == 0) // estimate once the bitrate is known (exact for CBR)
             durationFrames = (uint32_t)((double)(dataEnd - dataStart) * 8.0 / bitrate * sampleRate);
-        lockBus();
-        uint32_t pos = f.position();
-        int n = pos < dataEnd ? f.read(chunk, std::min<uint32_t>(sizeof(chunk), dataEnd - pos)) : 0;
-        unlockBus();
-        if (n <= 0) {
-            sink.flush();
-            playing = false;
-            trackEnded = true;
+
+        bool eof = fileEof; // read before the head: once set, every byte of the file is in the ring
+        __sync_synchronize();
+        uint32_t avail = rHead - rTail;
+        if (avail == 0) {
+            if (eof) {
+                sink.flush();
+                playing = false;
+                trackEnded = true;
+            } else {
+                vTaskDelay(1); // reader is catching up (only right after open / seek)
+            }
             continue;
         }
-        decoder.write(chunk, n);
-    }
-    if (f) {
-        lockBus();
-        f.close();
-        unlockBus();
+        uint32_t off = rTail & (ringSize - 1);
+        uint32_t n = std::min<uint32_t>(std::min<uint32_t>(avail, ringSize - off), 1024);
+        decoder.write(ring + off, n);
+        rTail = rTail + n;
     }
     decoder.end();
     audioTask = nullptr;
@@ -310,7 +487,14 @@ static void audioLoop(void *) {
 }
 
 // ------------------------------------------------------------------ track control
-static void openTrack(int i, bool play) {
+static void requestOpen(int i, bool play, bool cut) {
+    if (cut) pendingCut = true; // sticky until the audio task handles it
+    pendingOpen = i;
+    playing = play;
+}
+// cut: a user action (skip, pick from list) drops the audio already queued. Auto-advance at the end
+// of a song does not, so the last half second of the old song still plays out.
+static void openTrack(int i, bool play, bool cut = true) {
     if (tracks.empty()) return;
     i = ((i % (int)tracks.size()) + (int)tracks.size()) % (int)tracks.size();
     if (current >= 0 && current != i) {
@@ -318,16 +502,15 @@ static void openTrack(int i, bool play) {
         if (history.size() > 50) history.erase(history.begin());
     }
     current = i;
-    pendingOpen = i;
-    playing = play;
+    requestOpen(i, play, cut);
 }
-static void nextTrack() {
+static void nextTrack(bool cut = true) {
     if (tracks.empty()) return;
     if (shuffle && tracks.size() > 1) {
         int n;
         do n = random(tracks.size()); while (n == current);
-        openTrack(n, true);
-    } else openTrack(current + 1, true);
+        openTrack(n, true, cut);
+    } else openTrack(current + 1, true, cut);
 }
 static void prevTrack() {
     if (tracks.empty()) return;
@@ -336,11 +519,32 @@ static void prevTrack() {
         int p = history.back();
         history.pop_back();
         current = p;
-        pendingOpen = p;
-        playing = true;
+        requestOpen(p, true, true);
         return;
     }
     openTrack(current - 1, true);
+}
+
+// level of the sub-bass being heard right now (0 when silent / paused)
+static uint8_t bassNow(uint32_t now) {
+    int si = pickSnap(now);
+    return (si >= 0 && playing) ? snaps[si].bass : 0;
+}
+
+// called often from every UI loop while the player is open: auto-advance + haptics
+static void serviceAudio() {
+    if (trackEnded) {
+        trackEnded = false;
+        nextTrack(false);
+    }
+    // sub-bass haptics: kick drum -> vibration motor (only touch I2C from this task)
+    uint8_t b = bassNow(millis());
+    uint8_t want = 0;
+    if (haptic && playing && b > 70) want = (uint8_t)std::min(255, 110 + b / 2);
+    if ((want == 0) != (vib == 0) || abs((int)want - (int)vib) > 24) {
+        vib = want;
+        M5.Power.setVibration(vib);
+    }
 }
 
 // ------------------------------------------------------------------ drawing
@@ -394,8 +598,9 @@ static int btnX(int i) { return 4 + i * 63; }
 static const int VOL_X = 8, VOL_W = 190, VOL_Y = 214;
 static const int SUB_X = 216, SUB_Y = 196, SUB_W = 96, SUB_H = 40;
 static const int SEEK_X = 10, SEEK_W = 300, SEEK_Y = 146;
+static const int LIVE_Y0 = 18, LIVE_Y1 = BTN_Y; // rows that change every frame (LCD, analyser, seek)
 
-static void drawPlayer(uint32_t now, const uint8_t *peaks, int scroll) {
+static void drawPlayer(uint32_t now, const uint8_t *bands, const uint8_t *peaks, int scroll, bool beat) {
     mcCanvas.fillScreen(MC_CHARCOAL);
     // title bar
     mcCanvas.fillRect(0, 0, MC_W, 16, MC_TEAL_DK);
@@ -425,10 +630,13 @@ static void drawPlayer(uint32_t now, const uint8_t *peaks, int scroll) {
     mcText(b, 306, 39, &fonts::Font0, MC_GREEN, middle_right);
     mcText(channels == 1 ? "MONO" : "STEREO", 306, 50, &fonts::Font0, MC_GREEN, middle_right);
     // marquee
-    char t[100];
-    lockBus(); // trackTitle is written by the audio task under the same lock
-    snprintf(t, sizeof(t), "%s", current < 0 ? "NO MP3 FILES IN /music" : trackTitle);
-    unlockBus();
+    char t[sizeof(trackTitle)];
+    if (current < 0) snprintf(t, sizeof(t), "%s", "NO MP3 FILES IN /music");
+    else {
+        portENTER_CRITICAL(&titleMux);
+        memcpy(t, trackTitle, sizeof(t));
+        portEXIT_CRITICAL(&titleMux);
+    }
     String line = current >= 0 ? String(current + 1) + ". " + t : String(t);
     line.toUpperCase();
     mcCanvas.setFont(&fonts::Font2);
@@ -446,7 +654,7 @@ static void drawPlayer(uint32_t now, const uint8_t *peaks, int scroll) {
     bevel(4, 98, 312, 44, false, MC_LCD_BG);
     for (int y = 104; y < 140; y += 4) mcCanvas.drawFastHLine(8, y, 304, 0x0060);
     for (int i = 0; i < 20; i++) {
-        int x = 9 + i * 15, h = playing ? bands[i] * 34 / 255 : 0;
+        int x = 9 + i * 15, h = bands[i] * 34 / 255;
         for (int y = 0; y < h; y += 3) // segmented like an LCD
             mcCanvas.fillRect(x, 138 - y - 2, 12, 2, y > 26 ? 0xFFE0 : MC_GREEN);
         int pk = peaks[i] * 34 / 255;
@@ -485,7 +693,7 @@ static void drawPlayer(uint32_t now, const uint8_t *peaks, int scroll) {
     bevel(kx, SUB_Y + 14, SUB_W / 2 - 2, 20, true, haptic ? MC_PURPLE : MC_TEAL_DK);
     mcText("ON", SUB_X + SUB_W / 4 + 1, SUB_Y + 24, &fonts::Font0, haptic ? MC_GREEN : 0x632C, middle_center);
     mcText("OFF", SUB_X + 3 * SUB_W / 4, SUB_Y + 24, &fonts::Font0, haptic ? 0x632C : MC_WHITE, middle_center);
-    if (haptic && bass > 70 && playing) mcCanvas.fillCircle(SUB_X + SUB_W - 6, SUB_Y + 4, 3, MC_GREEN); // felt beat
+    if (beat) mcCanvas.fillCircle(SUB_X + SUB_W - 6, SUB_Y + 4, 3, MC_GREEN); // felt beat
 }
 
 // ------------------------------------------------------------------ playlist window
@@ -493,25 +701,31 @@ static void playlistScreen() {
     mcWaitRelease();
     const int rowH = 18, top = 20;
     int scroll = std::max(0, (current - 4) * rowH), scrollAtPress = 0;
+    int drawnScroll = -1, drawnCurrent = -2;
     for (;;) {
-        mcCanvas.fillScreen(MC_CHARCOAL);
-        mcCanvas.fillRect(0, 0, MC_W, 16, MC_TEAL_DK);
-        mcText("PLAYLIST", 160, 8, &fonts::Font0, MC_WHITE, middle_center);
-        bevel(298, 2, 18, 12, true, MC_PURPLE);
-        mcText("X", 307, 8, &fonts::Font0, MC_WHITE, middle_center);
-        bevel(4, top - 2, 312, MC_H - top - 2, false, MC_LCD_BG);
-        mcCanvas.setClipRect(6, top, 308, MC_H - top - 6);
-        for (int i = 0; i < (int)tracks.size(); i++) {
-            int y = top + 2 + i * rowH - scroll;
-            if (y < top - rowH || y > MC_H) continue;
-            if (i == current) mcCanvas.fillRect(6, y, 308, rowH - 1, MC_PURPLE);
-            String n = String(i + 1) + ". " + baseName(tracks[i]);
-            n.toUpperCase();
-            mcText(n.c_str(), 10, y + rowH / 2, &fonts::Font2, i == current ? MC_WHITE : MC_GREEN, middle_left);
+        serviceAudio(); // keep auto-advance and haptics going while the list is open
+        if (scroll != drawnScroll || current != drawnCurrent) { // redraw only on change: bus stays free
+            drawnScroll = scroll;
+            drawnCurrent = current;
+            mcCanvas.fillScreen(MC_CHARCOAL);
+            mcCanvas.fillRect(0, 0, MC_W, 16, MC_TEAL_DK);
+            mcText("PLAYLIST", 160, 8, &fonts::Font0, MC_WHITE, middle_center);
+            bevel(298, 2, 18, 12, true, MC_PURPLE);
+            mcText("X", 307, 8, &fonts::Font0, MC_WHITE, middle_center);
+            bevel(4, top - 2, 312, MC_H - top - 2, false, MC_LCD_BG);
+            mcCanvas.setClipRect(6, top, 308, MC_H - top - 6);
+            for (int i = 0; i < (int)tracks.size(); i++) {
+                int y = top + 2 + i * rowH - scroll;
+                if (y < top - rowH || y > MC_H) continue;
+                if (i == current) mcCanvas.fillRect(6, y, 308, rowH - 1, MC_PURPLE);
+                String n = String(i + 1) + ". " + baseName(tracks[i]);
+                n.toUpperCase();
+                mcText(n.c_str(), 10, y + rowH / 2, &fonts::Font2, i == current ? MC_WHITE : MC_GREEN, middle_left);
+            }
+            if (tracks.empty()) mcText("PUT .MP3 FILES IN /music", 160, 120, &fonts::Font2, MC_GREEN, middle_center);
+            mcCanvas.clearClipRect();
+            pushRows(0, MC_H);
         }
-        if (tracks.empty()) mcText("PUT .MP3 FILES IN /music", 160, 120, &fonts::Font2, MC_GREEN, middle_center);
-        mcCanvas.clearClipRect();
-        pushLocked();
         mcPollTouch();
         int maxScroll = std::max(0, (int)tracks.size() * rowH - (MC_H - top - 8));
         if (mcTouch.pressed) scrollAtPress = scroll;
@@ -524,14 +738,15 @@ static void playlistScreen() {
                 return;
             }
         }
-        delay(20);
+        delay(15);
     }
 }
 
 // ------------------------------------------------------------------ main loop
 void mcMusicPlayer() {
     if (!busLock) busLock = xSemaphoreCreateMutex();
-    if (!busLock) return;
+    if (!fileLock) fileLock = xSemaphoreCreateMutex();
+    if (!busLock || !fileLock) return;
     mcWaitRelease();
     mcLoadingBegin("Music");
     mcLoadingFrame(-1, "Finding your songs...");
@@ -550,21 +765,44 @@ void mcMusicPlayer() {
     p.end();
     if (volumePct > 100) volumePct = 70;
 
-    if (!sink.begin()) {
+    if (!sink.begin() || !ringAlloc()) {
+        sink.release();
+        ringFree();
         mcToast("Not enough memory for music", 0xF800, 2000);
         return;
     }
+    initAnalyser();
     mcNetStop(); // keep the CPU and SD bus for audio
+
+    // Speaker: output at 44.1 kHz (most MP3s, no resampling), ~93 ms of I2S DMA buffering so a
+    // busy moment never reaches the cone, and a speaker task that outranks the decoder.
+    M5.Speaker.end();
+    auto spkSaved = M5.Speaker.config();
+    auto spk = spkSaved;
+    spk.sample_rate = 44100;
+    spk.dma_buf_len = 512;
+    spk.dma_buf_count = 8;
+    spk.task_priority = 4;
+    M5.Speaker.config(spk);
     M5.Speaker.begin();
     M5.Speaker.setVolume((uint8_t)(volumePct * 255 / 100));
+    sink.outLatency = (uint32_t)((uint64_t)spk.dma_buf_len * spk.dma_buf_count * 1000 / spk.sample_rate);
+    sink.playEnd = millis();
+
     sink.dec = &decoder;
     audioQuit = false;
     playing = false;
     pendingOpen = -1;
+    pendingCut = false;
     pendingSeek = -1;
     trackEnded = false;
-    memset((void *)bands, 0, sizeof(bands));
+    rHead = rTail = 0;
+    fileEof = true;
+    clearSnaps();
+    vib = 0;
+    // both on core 0 (UI + display on core 1); decoder outranks the SD reader
     xTaskCreatePinnedToCore(audioLoop, "mcAudio", 12288, nullptr, 3, &audioTask, 0);
+    xTaskCreatePinnedToCore(readerLoop, "mcSdRead", 6144, nullptr, 2, &readerTask, 0);
 
     if (!tracks.empty()) {
         int start = 0;
@@ -573,11 +811,11 @@ void mcMusicPlayer() {
         openTrack(start, false); // ready, press play
     }
 
-    uint8_t peaks[20] = {};
-    uint32_t lastFrame = 0, lastPeakFall = 0;
-    uint8_t vib = 0;
+    uint8_t bands[20] = {}, peaks[20] = {};
+    uint32_t lastFrame = 0, lastSnapAt = 0, lastCtl = 0xFFFFFFFF;
     int scroll = 0;
-    bool draggingVol = false, draggingSeek = false;
+    bool draggingVol = false, draggingSeek = false, fullPush = true;
+    int16_t mono[FFT_N];
     for (;;) {
         mcPollTouch();
         uint32_t now = millis();
@@ -604,35 +842,47 @@ void mcMusicPlayer() {
                     else if (i == 1 && current >= 0) playing = !playing;
                     else if (i == 2) nextTrack();
                     else if (i == 3) shuffle = !shuffle;
-                    else if (i == 4) playlistScreen();
+                    else if (i == 4) { playlistScreen(); fullPush = true; }
                 } else if (sx >= SUB_X && sy >= SUB_Y) haptic = !haptic;
-                else if (sy >= 60 && sy < 95) playlistScreen(); // tap the track title
+                else if (sy >= 60 && sy < 95) { playlistScreen(); fullPush = true; } // tap the track title
             }
             draggingVol = draggingSeek = false;
         }
-        if (trackEnded) {
-            trackEnded = false;
-            nextTrack();
-        }
-        // sub-bass haptics: kick drum -> vibration motor (only touch I2C from this task)
-        uint8_t want = 0;
-        if (haptic && playing && bass > 70) want = (uint8_t)std::min(255, 110 + bass / 2);
-        if ((want == 0) != (vib == 0) || abs((int)want - (int)vib) > 24) {
-            vib = want;
-            M5.Power.setVibration(vib);
-        }
-        if (now - lastFrame >= 60) { // ~16 fps keeps the SPI bus free for the SD card
+        serviceAudio();
+
+        if (now - lastFrame >= 33) { // ~30 fps
             lastFrame = now;
-            if (now - lastPeakFall > 40) {
-                lastPeakFall = now;
-                for (int i = 0; i < 20; i++) {
-                    uint8_t b = playing ? bands[i] : 0;
-                    peaks[i] = b > peaks[i] ? b : (peaks[i] > 8 ? peaks[i] - 8 : 0);
+            // analyser: FFT of the buffer being heard right now (runs here, never in the audio task)
+            int si = playing ? pickSnap(now) : -1;
+            if (si >= 0) {
+                uint32_t at = snaps[si].at;
+                if (at != lastSnapAt) {
+                    lastSnapAt = at;
+                    memcpy(mono, snaps[si].mono, sizeof(mono));
+                    analyse(mono, bands);
+                }
+            } else {
+                memset(bands, 0, sizeof(bands));
+                lastSnapAt = 0;
+            }
+            for (int i = 0; i < 20; i++) peaks[i] = bands[i] > peaks[i] ? bands[i] : (peaks[i] > 5 ? peaks[i] - 5 : 0);
+            bool beat = haptic && playing && bassNow(now) > 70;
+            scroll += 1;
+            drawPlayer(now, bands, peaks, scroll, beat);
+            // push only what changed: the live top area every frame, the controls when they change
+            uint32_t ctl = (uint32_t)playing | (uint32_t)shuffle << 1 | (uint32_t)haptic << 2 | (uint32_t)beat << 3 |
+                           (uint32_t)volumePct << 8;
+            if (fullPush) {
+                pushRows(0, MC_H);
+                fullPush = false;
+                lastCtl = ctl;
+            } else {
+                pushRows(LIVE_Y0, LIVE_Y1);
+                if (ctl != lastCtl) {
+                    pushRows(LIVE_Y1, MC_H);
+                    lastCtl = ctl;
                 }
             }
-            scroll += 2;
-            drawPlayer(now, peaks, scroll);
-            pushLocked();
         }
         delay(5);
     }
@@ -640,11 +890,17 @@ void mcMusicPlayer() {
     // shut down: stop audio, release the speaker and motor, remember settings
     playing = false;
     audioQuit = true;
-    for (int i = 0; i < 200 && audioTask; i++) delay(10);
+    for (int i = 0; i < 300 && (audioTask || readerTask); i++) delay(10);
+    lockBus();
+    if (audioFile) audioFile.close();
+    unlockBus();
     M5.Power.setVibration(0);
+    vib = 0;
     M5.Speaker.stop();
     M5.Speaker.end();
+    M5.Speaker.config(spkSaved);
     sink.release();
+    ringFree();
     p.begin("mantismusic", false);
     p.putUChar("vol", volumePct);
     p.putBool("shuf", shuffle);
